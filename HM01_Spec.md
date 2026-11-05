@@ -11,11 +11,11 @@ It solves a critical problem for digital-minimalism setups, parental control DPC
 2. **No Tabs, No Bookmarks, No Persistent History:** When the window is closed (or times out), cookies, `WebStorage`, cache, and history are wiped.
 3. **Forced CleanBrowsing Family Filter DNS-over-HTTPS (DoH):** Every hostname is verified against CleanBrowsing's `FAMILY_FILTER` DoH endpoint before the `WebView` is permitted to connect, blocking porn, adult sites, proxies/VPN bypasses, and malware at the application layer regardless of OS network settings.
 4. **Anti-Escape-Hatch ("Link Leash"):** Users can view the link they tapped and navigate within that website (or complete OAuth/payment flows), with a maximum of `1` external domain hop after initial redirect resolution, and cannot use footer links to jump to Google Search, Bing, YouTube, or social feeds.
-5. **Pluggable Blocklist Architecture:** `HM01` remains neutral and multipurpose for the broader developer community, while a host app (like **Juubun**) can inject its own opinionated "Attention-Hog Blocklist" (news sites, Substack, Reddit, forums, AI chat portals, etc.) via a programmatic config API or Android Managed Configurations (`RestrictionsManager`).
+5. **Pluggable Blocklist Architecture:** `HM01` remains neutral and multipurpose for the broader developer community, while a host app (such as a digital-wellbeing launcher, parental control DPC, or enterprise management agent) can inject its own opinionated "Attention-Hog Blocklist" (news sites, Substack, Reddit, forums, AI chat portals, etc.) via a programmatic config API or Android Managed Configurations (`RestrictionsManager`).
 
 ---
 
-## 2. Repository & Gradle Architecture (Option 2: Standalone Repo + `includeBuild`)
+## 2. Repository & Gradle Architecture (Standalone Repo + `includeBuild` / JitPack)
 
 The `HM01` repository compiles both a **reusable Android Library (`.aar`)** (consumed directly by host apps via Gradle `includeBuild` or JitPack) and a **standalone open-source APK** for GitHub Releases.
 
@@ -130,7 +130,7 @@ Every URL (`shouldOverrideUrlLoading` and `shouldInterceptRequest`) passes throu
    * **`HM01` Open-Source Baseline (Built-in):**
      * Adult TLDs (`.xxx`, `.porn`, `.sex`, `.adult`, `.cam`, `.tube`, `.webcam`, `.sexy`)
      * Adult/NSFW hostname keywords (`porn`, `xxx`, `rule34`, `hentai`, `onlyfans`, `fansly`, `chaturbate`, `redgifs`, etc.)
-   * **Host-Injected Blocklist (Provided by Juubun at runtime):**
+   * **Host-Injected Blocklist (Provided by a host app at runtime):**
      * `blockedDomains: Set<String>` (exact domain + subdomain suffix match)
      * `blockedHostKeywords: Set<String>`
      * `blockedPathRegexes: List<Regex>` (e.g., `/reels`, `/shorts`, `/watch`, `/feeds`, `/r/`, `/trending`)
@@ -168,7 +168,7 @@ Many modern Android apps (Slack, banking apps, government apps, Auth0/AppAuth SD
 
 ---
 
-## 4. Configuration API & Juubun Integration
+## 4. Configuration API & Host App Integration
 
 ### 4.1. `BrowserPolicyConfig` Data Class (`hm01-core`)
 
@@ -196,45 +196,45 @@ data class BrowserPolicyConfig(
 
 ### 4.2. Dual Configuration Support (Programmatic + Android Managed Configurations)
 `BrowserPolicyProvider` resolves the active `BrowserPolicyConfig` in two ways:
-1. **Programmatic Injection (Used when embedded in Juubun via `:hm01-core`):**
-   Juubun calls `BrowserPolicyProvider.configure(...)` in its startup/enforcement path.
+1. **Programmatic Injection (Used when embedded in a host app via `:hm01-core`):**
+   The host app calls `BrowserPolicyProvider.configure(...)` in its startup/enforcement path.
 2. **Android Enterprise `RestrictionsManager` (Used when installed as a standalone `HM01` APK):**
    Reads `RestrictionsManager.getApplicationRestrictions()` keys (`doh_preset`, `blocked_domains`, `blocked_keywords`, `max_external_domain_hops`, `session_timeout_seconds`, `block_video_audio`), allowing any MDM or Device Owner DPC to manage the standalone APK remotely.
 
 ---
 
-## 5. How Juubun Connects to `HM01` (Option 2 Setup)
+## 5. Connecting a Host App to `HM01` (Composite Build Setup)
 
-### Step 1: Link in Juubun's `settings.gradle.kts`
-Assuming `HM01` is located at `C:\Users\samtu\Desktop\Projects\HM01` (`../HM01`):
+### Step 1: Link in the Host App's `settings.gradle.kts`
+Assuming `HM01` is located at `../HM01`:
 
 ```kotlin
-// In Zendroid/settings.gradle.kts
+// In settings.gradle.kts
 includeBuild("../HM01") {
     dependencySubstitution {
-        substitute(module("com.github.juubun:hm01-core")).using(project(":hm01-core"))
+        substitute(module("dev.hm01:hm01-core")).using(project(":hm01-core"))
     }
 }
 ```
 
-### Step 2: Add Dependency in Juubun's `app/build.gradle.kts`
+### Step 2: Add Dependency in the Host App's `app/build.gradle.kts`
 ```kotlin
 dependencies {
-    implementation("com.github.juubun:hm01-core:1.0.0")
+    implementation("dev.hm01:hm01-core:1.0.0")
 }
 ```
 
-### Step 3: Inject Juubun's Attention-Hog Blocklist
-Inside Juubun, pass your private blocklist (Substack, news sites, social feeds, Reddit, forums, AI portals, etc.) and custom callback schemes (`juubundpc://`, `juubunparent://`) into `BrowserPolicyProvider`:
+### Step 3: Inject Custom Blocklist & Callback Schemes
+Inside the host application, pass your custom blocklist (news sites, social feeds, forums, AI portals, etc.) and custom callback schemes (`myapp://`) into `BrowserPolicyProvider`:
 
 ```kotlin
 BrowserPolicyProvider.configure(
     BrowserPolicyConfig(
-        brandTitle = "Juubun Safe Link",
+        brandTitle = "Safe Link Viewer",
         dohPreset = DohPreset.CLEANBROWSING_FAMILY,
-        blockedDomains = JuubunBlocklist.ATTENTION_HOG_DOMAINS, // News, Substack, Reddit, Social, etc.
-        blockedHostKeywords = JuubunBlocklist.BLOCKED_KEYWORDS,
-        blockedPathRegexes = JuubunBlocklist.BLOCKED_PATH_PATTERNS,
+        blockedDomains = CustomBlocklist.ATTENTION_HOG_DOMAINS,
+        blockedHostKeywords = CustomBlocklist.BLOCKED_KEYWORDS,
+        blockedPathRegexes = CustomBlocklist.BLOCKED_PATH_PATTERNS,
         maxExternalDomainHops = 1,
         sessionTimeoutMs = 10 * 60 * 1000L,
         blockVideoAndAudio = true,
@@ -247,7 +247,7 @@ BrowserPolicyProvider.configure(
 
 ## 6. Verification & Acceptance Test Plan for `HM01`
 
-When building `HM01` in the new project, verify these 7 test scenarios via unit + instrumented tests:
+Verify these 7 test scenarios via unit + instrumented tests:
 1. **CleanBrowsing Family Filter DoH Enforcement:**
    * Querying a known adult domain or CleanBrowsing test domain (`adult-filter-test.cleanbrowsing.org`) via `DohResolver` returns `BLOCK` and prevents `WebView` connection.
    * Querying a legitimate retail domain (`kmart.com.au` or `ikea.com`) returns `ALLOW` and caches the result.

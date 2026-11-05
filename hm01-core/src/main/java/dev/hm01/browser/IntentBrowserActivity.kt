@@ -194,8 +194,11 @@ class IntentBrowserActivity : Activity() {
         settings.setGeolocationEnabled(false)
         @Suppress("DEPRECATION")
         settings.saveFormData = false
-        settings.setSupportMultipleWindows(false)
-        settings.javaScriptCanOpenWindowsAutomatically = false
+        // Support popup windows (e.g., Google 2-Step Verification & OAuth popups) by intercepting
+        // them in WebChromeClient.onCreateWindow and routing their URLs through the policy evaluator
+        // into the single main WebView.
+        settings.setSupportMultipleWindows(true)
+        settings.javaScriptCanOpenWindowsAutomatically = true
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         settings.mediaPlaybackRequiresUserGesture = true
         settings.builtInZoomControls = true
@@ -217,7 +220,9 @@ class IntentBrowserActivity : Activity() {
 
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
-        cookieManager.setAcceptThirdPartyCookies(wv, false)
+        // Cross-domain OAuth / 2SV challenges (e.g. accounts.google.com <-> myaccount.google.com)
+        // require cookies during the ephemeral session; all cookies are wiped on close/timeout.
+        cookieManager.setAcceptThirdPartyCookies(wv, true)
 
         wv.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
@@ -233,6 +238,37 @@ class IntentBrowserActivity : Activity() {
             override fun onShowCustomView(view: View?, callback: CustomViewCallback?) {
                 // Never allow fullscreen video custom views
                 callback?.onCustomViewHidden()
+            }
+
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: android.os.Message?
+            ): Boolean {
+                val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                val popupWebView = WebView(this@IntentBrowserActivity)
+                popupWebView.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(
+                        popupView: WebView?,
+                        request: WebResourceRequest?
+                    ): Boolean {
+                        val targetUrl = request?.url?.toString()
+                        popupView?.destroy()
+                        if (!targetUrl.isNullOrBlank()) {
+                            val decision = policyEvaluator.evaluateMainFrameNavigation(
+                                rawUrl = targetUrl,
+                                isInitialLaunch = false,
+                                isServerRedirect = false
+                            )
+                            applyMainFrameDecision(decision, loadIntoWebViewOnAllow = true)
+                        }
+                        return true
+                    }
+                }
+                transport.webView = popupWebView
+                resultMsg.sendToTarget()
+                return true
             }
         }
 
@@ -521,6 +557,18 @@ class IntentBrowserActivity : Activity() {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             startActivity(handoffIntent)
+        }.onFailure {
+            if (!targetPackage.isNullOrBlank()) {
+                runCatching {
+                    val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                        addCategory(Intent.CATEGORY_BROWSABLE)
+                        component = null
+                        selector = null
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(fallbackIntent)
+                }
+            }
         }
     }
 
