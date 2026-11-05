@@ -35,48 +35,6 @@ data class DnsProviderOption(
 )
 
 /**
- * Built-in DoH endpoint enum for backwards-compatible programmatic or Managed Configuration callers.
- */
-enum class DohPreset(val defaultEndpointUrl: String) {
-    NONE(""),
-    ADGUARD_FAMILY("https://family.adguard-dns.com/dns-query"),
-    CLEANBROWSING_ADULT("https://doh.cleanbrowsing.org/doh/adult-filter/"),
-    CLEANBROWSING_FAMILY("https://doh.cleanbrowsing.org/doh/family-filter/"),
-    CLEANBROWSING_SECURITY("https://doh.cleanbrowsing.org/doh/security-filter/"),
-    CLOUDFLARE_FAMILY("https://family.cloudflare-dns.com/dns-query"),
-    MULLVAD_FAMILY("https://family.dns.mullvad.net/dns-query"),
-    OPENDNS_FAMILYSHIELD("https://doh.familyshield.opendns.com/dns-query"),
-    FAMILY_FILTER("https://doh.cleanbrowsing.org/doh/family-filter/"),
-    ADULT_FILTER("https://doh.cleanbrowsing.org/doh/adult-filter/"),
-    SECURITY_FILTER("https://doh.cleanbrowsing.org/doh/security-filter/"),
-    CUSTOM("");
-
-    fun resolveEndpointUrl(customDohUrl: String? = null): String {
-        if (this == NONE) {
-            return customDohUrl?.trim().orEmpty()
-        }
-        if (this == CUSTOM) {
-            return customDohUrl?.trim().orEmpty()
-        }
-        return customDohUrl?.takeIf { it.isNotBlank() }?.trim() ?: defaultEndpointUrl
-    }
-
-    companion object {
-        fun fromString(value: String?): DohPreset {
-            if (value.isNullOrBlank()) return NONE
-            val normalized = value.trim().uppercase(Locale.ROOT).replace('-', '_')
-            return entries.firstOrNull { it.name == normalized }
-                ?: when (normalized) {
-                    "FAMILY" -> CLEANBROWSING_FAMILY
-                    "ADULT" -> CLEANBROWSING_ADULT
-                    "SECURITY" -> CLEANBROWSING_SECURITY
-                    else -> CUSTOM
-                }
-        }
-    }
-}
-
-/**
  * Target descriptor for handing off custom OAuth/app callback URI schemes (e.g. `juubundpc://`, `myapp://oauth`).
  */
 data class CustomSchemeTarget(
@@ -119,7 +77,6 @@ data class BrowserPolicyConfig(
     val dnsMode: DnsMode = DnsMode.DEVELOPER_FIXED,
     val userDnsOptions: List<DnsProviderOption> = emptyList(),
     val selectedDnsEndpointUrl: String? = null,
-    val dohPreset: DohPreset = DohPreset.NONE,
     val customDohUrl: String? = null,
     val failClosedOnDnsError: Boolean = false,
     val blockedDomains: Set<String> = emptySet(),
@@ -176,7 +133,7 @@ data class BrowserPolicyConfig(
 
     /**
      * Resolves the active DoH endpoint URL based on [dnsMode], [selectedDnsEndpointUrl],
-     * [BrowserPolicyProvider.getUserSelectedDnsUrl], [dohPreset], and [customDohUrl].
+     * [BrowserPolicyProvider.getUserSelectedDnsUrl], and [customDohUrl].
      */
     fun resolveActiveDohEndpointUrl(): String {
         return when (dnsMode) {
@@ -187,7 +144,7 @@ data class BrowserPolicyConfig(
             }
             DnsMode.DEVELOPER_FIXED -> {
                 selectedDnsEndpointUrl?.takeIf { it.isNotBlank() }?.trim()
-                    ?: dohPreset.resolveEndpointUrl(customDohUrl)
+                    ?: customDohUrl?.takeIf { it.isNotBlank() }?.trim().orEmpty()
             }
         }
     }

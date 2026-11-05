@@ -182,7 +182,6 @@ object BrowserPolicyProvider {
     @JvmStatic
     fun parseRestrictionsBundle(bundle: Bundle, base: BrowserPolicyConfig = BrowserPolicyConfig()): BrowserPolicyConfig {
         val brandTitle = bundle.getString("brand_title")?.takeIf { it.isNotBlank() } ?: base.brandTitle
-        val dohPreset = bundle.getString("doh_preset")?.let { DohPreset.fromString(it) } ?: base.dohPreset
         val customDohUrl = bundle.getString("custom_doh_url")?.takeIf { it.isNotBlank() } ?: base.customDohUrl
         val failClosed = if (bundle.containsKey("fail_closed_on_dns_error")) {
             bundle.getBoolean("fail_closed_on_dns_error", base.failClosedOnDnsError)
@@ -235,7 +234,6 @@ object BrowserPolicyProvider {
 
         return base.copy(
             brandTitle = brandTitle,
-            dohPreset = dohPreset,
             customDohUrl = customDohUrl,
             failClosedOnDnsError = failClosed,
             blockedDomains = blockedDomains,

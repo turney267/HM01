@@ -5,7 +5,6 @@ import dev.hm01.browser.config.BrowserPolicyProvider
 import dev.hm01.browser.config.CustomSchemeTarget
 import dev.hm01.browser.config.DnsMode
 import dev.hm01.browser.config.DnsProviderOption
-import dev.hm01.browser.config.DohPreset
 import dev.hm01.browser.config.PathScopedPlatformRule
 import dev.hm01.browser.dns.DohDecisionCache
 import dev.hm01.browser.dns.DohResolver
@@ -45,7 +44,7 @@ class Hm01AcceptanceUnitTest {
         val networkCalls = AtomicInteger(0)
 
         val fakeResolver = DohResolver(
-            configProvider = { BrowserPolicyConfig(dohPreset = DohPreset.CLEANBROWSING_FAMILY) },
+            configProvider = { BrowserPolicyConfig(customDohUrl = "https://dns.example.com/dns-query") },
             cache = cache,
             transport = { _, queryPacket, _ ->
                 networkCalls.incrementAndGet()
@@ -127,36 +126,44 @@ class Hm01AcceptanceUnitTest {
     }
 
     @Test
-    fun scenario1_liveCleanBrowsingFamilyFilterDohEndpoint() {
-        val liveCache = DohDecisionCache()
-        val liveResolver = DohResolver(
-            configProvider = {
-                BrowserPolicyConfig(
-                    dohPreset = DohPreset.CLEANBROWSING_FAMILY,
-                    failClosedOnDnsError = true
-                )
-            },
-            cache = liveCache
+    fun scenario1_userDefinedDnsModeRequiresSelection() {
+        BrowserPolicyProvider.reset()
+        val options = listOf(
+            DnsProviderOption("example_dns", "Example DNS", "https://dns.example.com/dns-query")
+        )
+        BrowserPolicyProvider.configure(
+            BrowserPolicyConfig(
+                dnsMode = DnsMode.USER_DEFINED,
+                userDnsOptions = options
+            )
         )
 
-        val blockedVerdict = liveResolver.resolve("adult-filter-test.cleanbrowsing.org")
-        assertEquals(
-            "CleanBrowsing test domain must resolve to BLOCK over live RFC 8484 DoH",
-            DohVerdict.BLOCK,
-            blockedVerdict
+        val evaluator = UrlPolicyEvaluator(
+            configProvider = { BrowserPolicyProvider.getConfig() },
+            dohResolver = createAllowAllDohResolver()
         )
 
-        val allowedVerdict = liveResolver.resolve("ikea.com")
-        assertEquals(
-            "Legitimate retail domain must resolve to ALLOW over live RFC 8484 DoH",
-            DohVerdict.ALLOW,
-            allowedVerdict
+        // Before the user selects a DNS provider, navigation must be blocked with DNS_NOT_SELECTED
+        val unselectedDecision = evaluator.evaluateMainFrameNavigation(
+            "https://ikea.com",
+            isInitialLaunch = true
         )
-        assertEquals(
-            "Allowed domain verdict must be cached in DohDecisionCache",
-            DohVerdict.ALLOW,
-            liveCache.get("ikea.com")
+        assertTrue(unselectedDecision is PolicyDecision.Block)
+        assertEquals(BlockReason.DNS_NOT_SELECTED, (unselectedDecision as PolicyDecision.Block).reason)
+
+        // Once the user selects a DNS option, navigation is allowed
+        BrowserPolicyProvider.setUserSelectedDns(
+            context = null,
+            optionId = "example_dns",
+            dohEndpointUrl = "https://dns.example.com/dns-query"
         )
+        evaluator.resetSession()
+        val selectedDecision = evaluator.evaluateMainFrameNavigation(
+            "https://ikea.com",
+            isInitialLaunch = true
+        )
+        assertTrue(selectedDecision is PolicyDecision.Allow)
+        BrowserPolicyProvider.reset()
     }
 
     // =========================================================================
