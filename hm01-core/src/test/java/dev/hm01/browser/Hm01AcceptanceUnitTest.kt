@@ -1,8 +1,12 @@
 package dev.hm01.browser
 
 import dev.hm01.browser.config.BrowserPolicyConfig
+import dev.hm01.browser.config.BrowserPolicyProvider
 import dev.hm01.browser.config.CustomSchemeTarget
+import dev.hm01.browser.config.DnsMode
+import dev.hm01.browser.config.DnsProviderOption
 import dev.hm01.browser.config.DohPreset
+import dev.hm01.browser.config.PathScopedPlatformRule
 import dev.hm01.browser.dns.DohDecisionCache
 import dev.hm01.browser.dns.DohResolver
 import dev.hm01.browser.dns.DohVerdict
@@ -161,7 +165,12 @@ class Hm01AcceptanceUnitTest {
 
     @Test
     fun scenario2_spouseGiftLinkFlowWithShortenerAndMediaLockdown() {
-        val config = BrowserPolicyConfig(maxExternalDomainHops = 1, blockVideoAndAudio = true)
+        val config = BrowserPolicyConfig(
+            maxExternalDomainHops = 1,
+            blockVideoAndAudio = true,
+            blockedMediaExtensions = setOf(".mp4"),
+            blockedSecFetchDests = setOf("video", "audio")
+        )
         val evaluator = UrlPolicyEvaluator(
             configProvider = { config },
             dohResolver = createAllowAllDohResolver()
@@ -240,8 +249,26 @@ class Hm01AcceptanceUnitTest {
 
     @Test
     fun scenario3_searchEngineEscapePrevention() {
+        val config = BrowserPolicyConfig(
+            searchEngineDomains = setOf(
+                "bing.com",
+                "duckduckgo.com",
+                "search.brave.com",
+                "kagi.com",
+                "translate.google.com",
+                "translate.goog",
+                "web.archive.org",
+                "12ft.io"
+            ),
+            pathScopedPlatformRules = listOf(
+                PathScopedPlatformRule(
+                    domain = "google.*",
+                    allowedPathPrefixes = listOf("/o/oauth", "/signin", "/v3/signin")
+                )
+            )
+        )
         val evaluator = UrlPolicyEvaluator(
-            configProvider = { BrowserPolicyConfig() },
+            configProvider = { config },
             dohResolver = createAllowAllDohResolver()
         )
 
@@ -285,9 +312,30 @@ class Hm01AcceptanceUnitTest {
 
     @Test
     fun scenario4_oauthAndPasskeySignInFlowAndUserAgentSanitization() {
+        // Verify default BrowserPolicyConfig contains only the single example github.com rule
+        val defaultConfig = BrowserPolicyConfig()
+        assertEquals(1, defaultConfig.pathScopedPlatformRules.size)
+        assertEquals("github.com", defaultConfig.pathScopedPlatformRules.first().domain)
+        assertEquals(setOf(".mp4"), defaultConfig.blockedMediaExtensions)
+        assertTrue(defaultConfig.blockedDomains.isEmpty())
+
         val evaluator = UrlPolicyEvaluator(
             configProvider = {
                 BrowserPolicyConfig(
+                    pathScopedPlatformRules = listOf(
+                        PathScopedPlatformRule(
+                            domain = "github.com",
+                            allowedPathPrefixes = listOf("/login", "/sessions", "/settings/two_factor")
+                        ),
+                        PathScopedPlatformRule(
+                            domain = "google.*",
+                            allowedPathPrefixes = listOf("/o/oauth", "/signin", "/v3/signin", "/accounts/")
+                        ),
+                        PathScopedPlatformRule(
+                            domain = "facebook.com",
+                            allowedPathRegexes = listOf("^/login.*", "^/dialog/oauth.*", "^/v[0-9.]+/dialog/oauth.*")
+                        )
+                    ),
                     customCallbackSchemes = mapOf(
                         "juubunparent" to CustomSchemeTarget("juubunparent", "com.juubun.app")
                     )

@@ -2,20 +2,15 @@ package dev.hm01.browser.dns
 
 import dev.hm01.browser.config.BrowserPolicyConfig
 import dev.hm01.browser.config.DefaultBaselineLists
+import dev.hm01.browser.config.DnsMode
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.io.IOException
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 import java.util.Locale
 import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SNIHostName
-import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
 
 /**
  * Pluggable transport for executing RFC 8484 DNS-over-HTTPS queries.
@@ -26,16 +21,16 @@ fun interface DohTransport {
 }
 
 /**
- * CleanBrowsing RFC 8484 DNS-over-HTTPS (DoH) client.
+ * Standard RFC 8484 DNS-over-HTTPS (DoH) client (`application/dns-message`).
  *
- * Verifies every hostname against CleanBrowsing's DoH endpoint (default `FAMILY_FILTER`)
- * using binary DNS wireformat (`application/dns-message`) and pinned IP bootstrap
- * (`185.228.168.168` / `185.228.169.168`) so initial lookups never depend on untrusted local DNS.
+ * Works with any RFC 8484 DoH provider selected by the user or configured by the developer
+ * (e.g., AdGuard Family, CleanBrowsing Adult/Family, Cloudflare Family, Mullvad Family,
+ * OpenDNS FamilyShield, or a custom DoH server URL).
  */
 open class DohResolver(
     private val configProvider: () -> BrowserPolicyConfig = { BrowserPolicyConfig() },
     val cache: DohDecisionCache = SharedCacheHolder.INSTANCE,
-    private val transport: DohTransport = HttpsPinnedDohTransport(),
+    private val transport: DohTransport = StandardRfc8484DohTransport(),
     private val timeoutMs: Int = DEFAULT_TIMEOUT_MS
 ) {
 
@@ -44,14 +39,28 @@ open class DohResolver(
     }
 
     /**
-     * Evaluates [rawHost] against the configured CleanBrowsing DoH endpoint, using the shared
-     * LRU+TTL cache and coalescing concurrent in-flight requests for the same hostname.
+     * Evaluates [rawHost] against the active DoH endpoint, using the shared LRU+TTL cache
+     * and coalescing concurrent in-flight requests for the same hostname.
      */
     open fun resolve(rawHost: String): DohVerdict {
         val host = rawHost.trim().trimEnd('.').lowercase(Locale.ROOT)
         if (host.isEmpty()) return DohVerdict.BLOCK
 
-        // Explicit CleanBrowsing test domain check in case offline/unit-tested without network
+        val config = configProvider()
+        if (config.dnsMode == DnsMode.DISABLED) {
+            return DohVerdict.ALLOW
+        }
+
+        val endpointUrl = config.resolveActiveDohEndpointUrl()
+        if (endpointUrl.isBlank()) {
+            // If USER_DEFINED mode has no selected DNS server yet, fail closed without caching
+            return if (config.dnsMode == DnsMode.USER_DEFINED) {
+                DohVerdict.BLOCK
+            } else {
+                DohVerdict.ALLOW
+            }
+        }
+
         cache.get(host)?.let { return it }
 
         var shouldCache = true
@@ -60,16 +69,14 @@ open class DohResolver(
             timeoutMs = (timeoutMs * 2L).coerceAtLeast(3_000L),
             cacheResult = { shouldCache }
         ) { targetHost ->
-            val config = configProvider()
-            val endpointUrl = config.dohPreset.resolveEndpointUrl(config.customDohUrl)
             try {
                 val queryBytes = buildDnsAQueryPacket(targetHost)
                 val responseBytes = transport.query(endpointUrl, queryBytes, timeoutMs)
                 parseDnsResponseVerdict(responseBytes)
             } catch (e: Exception) {
                 shouldCache = false
-                if (DefaultBaselineLists.isDedicatedTrustedIdpOrPaymentOrCaptchaHost(targetHost)) {
-                    // Fail open for Trusted IdP hosts so sign-ins don't break on captive portals
+                if (DefaultBaselineLists.isDedicatedTrustedIdpOrPaymentOrCaptchaHost(targetHost, config)) {
+                    // Fail open for Trusted IdP hosts so sign-ins don't break on transient DNS hiccups
                     DohVerdict.ALLOW
                 } else if (config.failClosedOnDnsError) {
                     DohVerdict.BLOCK
@@ -81,13 +88,7 @@ open class DohResolver(
     }
 
     companion object {
-        const val DEFAULT_TIMEOUT_MS: Int = 1_500
-        const val CLEANBROWSING_DOH_HOST: String = "doh.cleanbrowsing.org"
-
-        val CLEANBROWSING_BOOTSTRAP_IPS: List<ByteArray> = listOf(
-            byteArrayOf(185.toByte(), 228.toByte(), 168.toByte(), 168.toByte()),
-            byteArrayOf(185.toByte(), 228.toByte(), 169.toByte(), 168.toByte())
-        )
+        const val DEFAULT_TIMEOUT_MS: Int = 2_000
 
         private const val DNS_TYPE_A = 1
         private const val DNS_TYPE_CNAME = 5
@@ -141,12 +142,13 @@ open class DohResolver(
         }
 
         /**
-         * Parses an RFC 1035 binary DNS response packet and evaluates CleanBrowsing's verdict:
-         * - `BLOCK`: `RCODE == 3` (`NXDOMAIN`), empty answer with sinkhole SOA (`cleanbrowsing.rpz`),
-         *   or any A record pointing to CleanBrowsing block/sinkhole IPs (`185.228.168.0/24`,
-         *   `185.228.169.0/24`, `0.0.0.0`, `127.0.0.1`).
-         * - `ALLOW`: `RCODE == 0` (`NOERROR`) with at least one valid public IP record that is not
-         *   a sinkhole IP.
+         * Parses an RFC 1035 binary DNS response packet and evaluates the filter verdict across
+         * standard DoH providers (AdGuard, CleanBrowsing, Cloudflare, Mullvad, OpenDNS, NextDNS, etc.):
+         * - `BLOCK`: `RCODE != 0` (`NXDOMAIN` / `REFUSED`), empty answer with RPZ/block SOA,
+         *   or any A record pointing to a known block/sinkhole IP (`0.0.0.0`, `127.0.0.0/8`,
+         *   CleanBrowsing `185.228.168.0/24` & `185.228.169.0/24`, AdGuard `94.140.14.33..36`,
+         *   OpenDNS `146.112.61.0/24`).
+         * - `ALLOW`: `RCODE == 0` (`NOERROR`) with at least one valid public IP or CNAME record.
          */
         @JvmStatic
         fun parseDnsResponseVerdict(packet: ByteArray): DohVerdict {
@@ -154,10 +156,7 @@ open class DohResolver(
 
             val flags = readUInt16(packet, 2)
             val rcode = flags and 0x0F
-            if (rcode == RCODE_NXDOMAIN) {
-                return DohVerdict.BLOCK
-            }
-            if (rcode != RCODE_NOERROR) {
+            if (rcode == RCODE_NXDOMAIN || rcode != RCODE_NOERROR) {
                 return DohVerdict.BLOCK
             }
 
@@ -199,7 +198,9 @@ open class DohResolver(
                     hasCnameRecord = true
                     val cnameTarget = decodeDnsName(packet, offset).lowercase(Locale.ROOT)
                     if (cnameTarget.contains("cleanbrowsing.rpz") ||
-                        cnameTarget.contains("block.cleanbrowsing")
+                        cnameTarget.contains("block.cleanbrowsing") ||
+                        cnameTarget.contains("block.opendns") ||
+                        cnameTarget.contains("blocked.")
                     ) {
                         return DohVerdict.BLOCK
                     }
@@ -208,7 +209,7 @@ open class DohResolver(
                 offset += rdLength
             }
 
-            // Parse Authority RRs (check for cleanbrowsing.rpz sinkhole SOA)
+            // Parse Authority RRs (check for RPZ sinkhole SOA)
             for (i in 0 until nsCount) {
                 val ownerName = decodeDnsName(packet, offset).lowercase(Locale.ROOT)
                 offset = skipDnsName(packet, offset)
@@ -218,7 +219,7 @@ open class DohResolver(
                 offset += 10
                 if (offset + rdLength > packet.size) break
 
-                if (ownerName.contains("cleanbrowsing.rpz")) {
+                if (ownerName.contains("cleanbrowsing.rpz") || ownerName.contains(".rpz")) {
                     return DohVerdict.BLOCK
                 }
                 if (rrType == DNS_TYPE_SOA) {
@@ -229,7 +230,10 @@ open class DohResolver(
                     } else {
                         ""
                     }
-                    if (mname.contains("cleanbrowsing.rpz") || rname.contains("cleanbrowsing.rpz")) {
+                    if (mname.contains("cleanbrowsing.rpz") ||
+                        rname.contains("cleanbrowsing.rpz") ||
+                        mname.contains(".rpz.")
+                    ) {
                         return DohVerdict.BLOCK
                     }
                 }
@@ -239,23 +243,25 @@ open class DohResolver(
             return if (validPublicARecords > 0 || hasCnameRecord) {
                 DohVerdict.ALLOW
             } else {
-                // RCODE == 0 with 0 valid A records and no CNAME
                 DohVerdict.BLOCK
             }
         }
 
         /**
-         * Checks whether an IPv4 address (`b0.b1.b2.b3`) is a known CleanBrowsing block/sinkhole IP:
-         * - `185.228.168.0/24`
-         * - `185.228.169.0/24`
-         * - `0.0.0.0`
-         * - `127.0.0.1` (or `127.0.0.0/8`)
+         * Checks whether an IPv4 address (`b0.b1.b2.b3`) is a known DNS filter block/sinkhole IP:
+         * - `0.0.0.0` (Cloudflare Family, Mullvad, AdGuard, NextDNS)
+         * - `127.0.0.0/8` (loopback sinkhole)
+         * - `185.228.168.0/24` & `185.228.169.0/24` (CleanBrowsing Family & Adult)
+         * - `94.140.14.33`..`94.140.14.36` (AdGuard Family block page IPs)
+         * - `146.112.61.0/24` (OpenDNS FamilyShield block page IPs)
          */
         @JvmStatic
         fun isSinkholeOrBlockIp(b0: Int, b1: Int, b2: Int, b3: Int): Boolean {
             if (b0 == 0 && b1 == 0 && b2 == 0 && b3 == 0) return true
             if (b0 == 127) return true
             if (b0 == 185 && b1 == 228 && (b2 == 168 || b2 == 169)) return true
+            if (b0 == 94 && b1 == 140 && b2 == 14 && b3 in 33..36) return true
+            if (b0 == 146 && b1 == 112 && b2 == 61) return true
             return false
         }
 
@@ -272,7 +278,6 @@ open class DohResolver(
                     return offset + 1
                 }
                 if ((len and 0xC0) == 0xC0) {
-                    // 2-byte compression pointer terminates the name in-place
                     return if (offset + 2 <= packet.size) offset + 2 else -1
                 }
                 offset += 1 + len
@@ -306,14 +311,9 @@ open class DohResolver(
 }
 
 /**
- * Default RFC 8484 HTTPS transport with pinned IP bootstrap (`185.228.168.168` / `185.228.169.168`)
- * for `doh.cleanbrowsing.org`.
+ * Standard RFC 8484 HTTPS transport (`GET ?dns=<base64url>` with `Accept: application/dns-message`).
  */
-class HttpsPinnedDohTransport : DohTransport {
-
-    private val pinnedSocketFactory = CleanBrowsingPinnedSslSocketFactory(
-        SSLSocketFactory.getDefault() as SSLSocketFactory
-    )
+class StandardRfc8484DohTransport : DohTransport {
 
     override fun query(endpointUrl: String, dnsQueryPacket: ByteArray, timeoutMs: Int): ByteArray {
         val encodedDns = DohResolver.encodeBase64UrlUnpadded(dnsQueryPacket)
@@ -325,11 +325,8 @@ class HttpsPinnedDohTransport : DohTransport {
             connectTimeout = timeoutMs
             readTimeout = timeoutMs
             useCaches = false
-            instanceFollowRedirects = false
+            instanceFollowRedirects = true
             setRequestProperty("Accept", "application/dns-message")
-            if (fullUrl.host.equals(DohResolver.CLEANBROWSING_DOH_HOST, ignoreCase = true)) {
-                sslSocketFactory = pinnedSocketFactory
-            }
         }
 
         try {
@@ -340,97 +337,6 @@ class HttpsPinnedDohTransport : DohTransport {
             return connection.inputStream.use { it.readBytes() }
         } finally {
             connection.disconnect()
-        }
-    }
-
-    private class CleanBrowsingPinnedSslSocketFactory(
-        private val delegate: SSLSocketFactory
-    ) : SSLSocketFactory() {
-
-        override fun getDefaultCipherSuites(): Array<String> = delegate.defaultCipherSuites
-        override fun getSupportedCipherSuites(): Array<String> = delegate.supportedCipherSuites
-
-        override fun createSocket(s: Socket?, host: String?, port: Int, autoClose: Boolean): Socket {
-            val sslSocket = delegate.createSocket(s, host, port, autoClose) as SSLSocket
-            configureSslSocket(sslSocket, host)
-            return sslSocket
-        }
-
-        override fun createSocket(host: String?, port: Int): Socket {
-            if (host.equals(DohResolver.CLEANBROWSING_DOH_HOST, ignoreCase = true)) {
-                return connectPinnedSocket(host!!, port)
-            }
-            val sslSocket = delegate.createSocket(host, port) as SSLSocket
-            configureSslSocket(sslSocket, host)
-            return sslSocket
-        }
-
-        override fun createSocket(
-            host: String?,
-            port: Int,
-            localHost: InetAddress?,
-            localPort: Int
-        ): Socket {
-            val sslSocket = delegate.createSocket(host, port, localHost, localPort) as SSLSocket
-            configureSslSocket(sslSocket, host)
-            return sslSocket
-        }
-
-        override fun createSocket(host: InetAddress?, port: Int): Socket {
-            val sslSocket = delegate.createSocket(host, port) as SSLSocket
-            configureSslSocket(sslSocket, host?.hostName)
-            return sslSocket
-        }
-
-        override fun createSocket(
-            address: InetAddress?,
-            port: Int,
-            localAddress: InetAddress?,
-            localPort: Int
-        ): Socket {
-            val sslSocket = delegate.createSocket(address, port, localAddress, localPort) as SSLSocket
-            configureSslSocket(sslSocket, address?.hostName)
-            return sslSocket
-        }
-
-        private fun connectPinnedSocket(host: String, port: Int): Socket {
-            var lastError: IOException? = null
-            for (ipBytes in DohResolver.CLEANBROWSING_BOOTSTRAP_IPS) {
-                try {
-                    val pinnedAddr = InetAddress.getByAddress(host, ipBytes)
-                    val rawSocket = Socket()
-                    rawSocket.connect(
-                        InetSocketAddress(pinnedAddr, if (port > 0) port else 443),
-                        DohResolver.DEFAULT_TIMEOUT_MS
-                    )
-                    val sslSocket = delegate.createSocket(
-                        rawSocket,
-                        host,
-                        if (port > 0) port else 443,
-                        true
-                    ) as SSLSocket
-                    configureSslSocket(sslSocket, host)
-                    return sslSocket
-                } catch (e: IOException) {
-                    lastError = e
-                }
-            }
-            throw lastError ?: IOException("Failed to connect to pinned DoH bootstrap IPs for $host")
-        }
-
-        private fun configureSslSocket(sslSocket: SSLSocket, host: String?) {
-            val supported = sslSocket.supportedProtocols
-            val tlsProtocols = supported.filter { it == "TLSv1.3" || it == "TLSv1.2" }.toTypedArray()
-            if (tlsProtocols.isNotEmpty()) {
-                sslSocket.enabledProtocols = tlsProtocols
-            }
-            if (!host.isNullOrBlank()) {
-                runCatching {
-                    val params = sslSocket.sslParameters
-                    params.serverNames = listOf(SNIHostName(host))
-                    sslSocket.sslParameters = params
-                }
-            }
         }
     }
 }

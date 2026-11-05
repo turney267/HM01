@@ -10,9 +10,14 @@ import dev.hm01.browser.dns.DohResolver
  *
  * Supports:
  * 1. Programmatic configuration via [configure] (for host apps like Juubun consuming `:hm01-core`).
- * 2. Android Enterprise Managed Configurations via [RestrictionsManager] (for standalone APK deployments).
+ * 2. User-defined DNS selection persistence via [setUserSelectedDns] / [getUserSelectedDnsUrl].
+ * 3. Android Enterprise Managed Configurations via [RestrictionsManager].
  */
 object BrowserPolicyProvider {
+
+    private const val PREFS_NAME = "hm01_browser_prefs"
+    private const val KEY_SELECTED_DNS_ID = "selected_dns_id"
+    private const val KEY_SELECTED_DNS_URL = "selected_dns_url"
 
     @Volatile
     private var programmaticConfig: BrowserPolicyConfig? = null
@@ -20,12 +25,89 @@ object BrowserPolicyProvider {
     @Volatile
     private var customDohResolver: DohResolver? = null
 
+    @Volatile
+    private var userSelectedDnsId: String? = null
+
+    @Volatile
+    private var userSelectedDnsUrl: String? = null
+
     /**
      * Programmatically sets the active [BrowserPolicyConfig].
+     *
+     * @throws IllegalArgumentException if [BrowserPolicyConfig.dnsMode] is [DnsMode.USER_DEFINED]
+     * and [BrowserPolicyConfig.userDnsOptions] is empty.
      */
     @JvmStatic
     fun configure(config: BrowserPolicyConfig) {
+        if (config.dnsMode == DnsMode.USER_DEFINED) {
+            require(config.userDnsOptions.isNotEmpty()) {
+                "DnsMode.USER_DEFINED requires a non-empty userDnsOptions list to be provided by the developer."
+            }
+        }
         programmaticConfig = config
+        if (!config.selectedDnsEndpointUrl.isNullOrBlank()) {
+            userSelectedDnsUrl = config.selectedDnsEndpointUrl.trim()
+        }
+    }
+
+    /**
+     * Loads any persisted user-selected DNS choice from SharedPreferences into memory.
+     */
+    @JvmStatic
+    fun loadUserDnsSelection(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val savedId = prefs.getString(KEY_SELECTED_DNS_ID, null)?.takeIf { it.isNotBlank() }
+        val savedUrl = prefs.getString(KEY_SELECTED_DNS_URL, null)?.takeIf { it.isNotBlank() }
+        userSelectedDnsId = savedId
+        userSelectedDnsUrl = savedUrl
+    }
+
+    /**
+     * Updates and persists the user's selected DNS provider or custom DoH endpoint URL,
+     * and clears the DoH decision cache so the new DNS filter takes effect immediately.
+     */
+    @JvmStatic
+    fun setUserSelectedDns(
+        context: Context? = null,
+        optionId: String?,
+        dohEndpointUrl: String?
+    ) {
+        val cleanId = optionId?.trim()?.takeIf { it.isNotEmpty() }
+        val cleanUrl = dohEndpointUrl?.trim()?.takeIf { it.isNotEmpty() }
+        userSelectedDnsId = cleanId
+        userSelectedDnsUrl = cleanUrl
+
+        if (context != null) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_SELECTED_DNS_ID, cleanId)
+                .putString(KEY_SELECTED_DNS_URL, cleanUrl)
+                .apply()
+        }
+
+        DohResolver.SharedCacheHolder.INSTANCE.clear()
+    }
+
+    /**
+     * Returns the ID of the DNS provider currently selected by the user, or `null` if none is selected.
+     */
+    @JvmStatic
+    fun getUserSelectedDnsId(context: Context? = null): String? {
+        if (userSelectedDnsId == null && context != null) {
+            loadUserDnsSelection(context)
+        }
+        return userSelectedDnsId
+    }
+
+    /**
+     * Returns the DoH endpoint URL currently selected by the user, or `null` if none is selected.
+     */
+    @JvmStatic
+    fun getUserSelectedDnsUrl(context: Context? = null): String? {
+        if (userSelectedDnsUrl == null && context != null) {
+            loadUserDnsSelection(context)
+        }
+        return userSelectedDnsUrl
     }
 
     /**
@@ -53,6 +135,8 @@ object BrowserPolicyProvider {
     fun reset() {
         programmaticConfig = null
         customDohResolver = null
+        userSelectedDnsId = null
+        userSelectedDnsUrl = null
     }
 
     /**
@@ -65,7 +149,18 @@ object BrowserPolicyProvider {
      */
     @JvmStatic
     fun getConfig(context: Context? = null): BrowserPolicyConfig {
-        programmaticConfig?.let { return it }
+        if (context != null && userSelectedDnsUrl == null) {
+            loadUserDnsSelection(context)
+        }
+
+        programmaticConfig?.let { config ->
+            val activeUserUrl = userSelectedDnsUrl
+            return if (config.dnsMode == DnsMode.USER_DEFINED && !activeUserUrl.isNullOrBlank()) {
+                config.copy(selectedDnsEndpointUrl = activeUserUrl)
+            } else {
+                config
+            }
+        }
 
         if (context != null) {
             val restrictions = runCatching {
@@ -101,7 +196,8 @@ object BrowserPolicyProvider {
         val allowedDomainsOverride = extractStringSet(bundle, "allowed_domains_override") ?: base.allowedDomainsOverride
 
         val maxExternalHops = if (bundle.containsKey("max_external_domain_hops")) {
-            bundle.getInt("max_external_domain_hops", base.maxExternalDomainHops).coerceAtLeast(0)
+            val rawHops = bundle.getInt("max_external_domain_hops", base.maxExternalDomainHops ?: 1)
+            if (rawHops < 0) null else rawHops
         } else {
             base.maxExternalDomainHops
         }

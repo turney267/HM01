@@ -7,34 +7,15 @@ import java.util.Locale
 
 /**
  * Enforces video, audio, and media streaming lockdown at both the network interception layer
- * and the DOM/JavaScript layer.
+ * and the DOM/JavaScript layer based on the developer's [BrowserPolicyConfig].
+ *
+ * Out of the box, [BrowserPolicyConfig.blockedMediaExtensions] contains only a single example
+ * format (`setOf(".mp4")`) and header/MIME/byte-range sets are empty until populated by the developer.
  */
 object MediaStreamBlocker {
 
-    val BLOCKED_MEDIA_EXTENSIONS: Set<String> = setOf(
-        ".mp4",
-        ".webm",
-        ".m3u8",
-        ".mpd",
-        ".ts",
-        ".m4s",
-        ".mov",
-        ".avi",
-        ".mkv",
-        ".flv",
-        ".gifv",
-        ".mp3",
-        ".m4a",
-        ".ogg",
-        ".wav"
-    )
-
-    val BLOCKED_SEC_FETCH_DESTS: Set<String> = setOf(
-        "video",
-        "audio",
-        "object",
-        "embed"
-    )
+    val DEFAULT_EXAMPLE_MEDIA_EXTENSIONS: Set<String> =
+        BrowserPolicyConfig.DEFAULT_EXAMPLE_MEDIA_EXTENSIONS
 
     /**
      * Evaluates whether a network request should be blocked as a video/audio/media stream.
@@ -56,10 +37,12 @@ object MediaStreamBlocker {
         val host = parsed?.host ?: extractFallbackHost(url)
         val path = (parsed?.rawPath ?: extractFallbackPath(url)).lowercase(Locale.ROOT)
 
-        // 1. Check media file extensions on the URL path
-        if (hasBlockedMediaExtension(path)) {
+        // 1. Check media file extensions on the URL path configured in BrowserPolicyConfig
+        if (hasBlockedMediaExtension(path, config.blockedMediaExtensions)) {
             return true
         }
+
+        if (requestHeaders.isEmpty()) return false
 
         // Normalize header lookup
         var acceptHeader: String? = null
@@ -74,24 +57,31 @@ object MediaStreamBlocker {
             }
         }
 
-        // 2. Check Sec-Fetch-Dest header (video | audio | object | embed)
-        if (secFetchDest != null && secFetchDest in BLOCKED_SEC_FETCH_DESTS) {
-            return true
+        // 2. Check Sec-Fetch-Dest header against configured blockedSecFetchDests
+        if (secFetchDest != null && config.blockedSecFetchDests.isNotEmpty()) {
+            if (config.blockedSecFetchDests.any { it.equals(secFetchDest, ignoreCase = true) }) {
+                return true
+            }
         }
 
-        // 3. Check Accept header for video/* or audio/* media requests
-        if (acceptHeader != null) {
+        // 3. Check Accept header against configured blockedMediaMimePrefixes (e.g. "video/", "audio/")
+        if (acceptHeader != null && config.blockedMediaMimePrefixes.isNotEmpty()) {
             val isDocumentOrImageAccept = acceptHeader.startsWith("text/html") ||
                 acceptHeader.startsWith("image/")
             if (!isDocumentOrImageAccept &&
-                (acceptHeader.contains("video/") || acceptHeader.contains("audio/"))
+                config.blockedMediaMimePrefixes.any { prefix ->
+                    acceptHeader.contains(prefix.lowercase(Locale.ROOT))
+                }
             ) {
                 return true
             }
         }
 
-        // 4. Check byte-range media streaming (Range: bytes=...) except on known Captcha challenge hosts
-        if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+        // 4. Check byte-range media streaming (Range: bytes=...) when enabled
+        if (config.blockByteRangeMediaRequests &&
+            rangeHeader != null &&
+            rangeHeader.startsWith("bytes=")
+        ) {
             if (!DefaultBaselineLists.isCaptchaHost(host, path)) {
                 return true
             }
@@ -101,31 +91,32 @@ object MediaStreamBlocker {
     }
 
     /**
-     * Checks whether [rawPath] ends with any blocked video or audio file extension.
+     * Checks whether [rawPath] ends with any blocked file extension in [extensions].
      */
     @JvmStatic
-    fun hasBlockedMediaExtension(rawPath: String): Boolean {
+    @JvmOverloads
+    fun hasBlockedMediaExtension(
+        rawPath: String,
+        extensions: Set<String> = DEFAULT_EXAMPLE_MEDIA_EXTENSIONS
+    ): Boolean {
+        if (extensions.isEmpty()) return false
         val cleanPath = rawPath
             .substringBefore('?')
             .substringBefore('#')
             .trim()
             .lowercase(Locale.ROOT)
         if (cleanPath.isEmpty()) return false
-        return BLOCKED_MEDIA_EXTENSIONS.any { ext ->
-            cleanPath.endsWith(ext)
+        return extensions.any { rawExt ->
+            val ext = rawExt.trim().lowercase(Locale.ROOT).let {
+                if (it.startsWith(".")) it else ".$it"
+            }
+            ext.length > 1 && cleanPath.endsWith(ext)
         }
     }
 
     /**
      * Builds the DOM/JavaScript lockdown script injected on `onPageStarted`, `onPageCommitVisible`,
      * and `onPageFinished`.
-     *
-     * - Overrides `HTMLMediaElement.prototype.play` to immediately pause and reject
-     * - Deletes `window.MediaSource`, `window.ManagedMediaSource`, `window.RTCPeerConnection`,
-     *   and `window.webkitRTCPeerConnection`
-     * - Disables `Element.prototype.requestFullscreen`
-     * - Injects CSS hiding `video, audio, object, embed`
-     * - Optionally caps image dimensions when [BrowserPolicyConfig.capImageDimensions] is `true`
      */
     @JvmStatic
     fun buildLockdownJavascript(config: BrowserPolicyConfig = BrowserPolicyConfig()): String {

@@ -3,12 +3,13 @@ package dev.hm01.browser.config
 import java.util.Locale
 
 /**
- * Built-in baseline rules for `HM01`:
+ * Minimal baseline helpers for `HM01`:
  * - Dedicated OAuth Identity Providers (IdPs), Payment Gateways & Captcha Hosts
- * - Path-scoped multi-purpose platforms (`google.*`, `facebook.com`, `github.com`, `*.firebaseapp.com`, `*.web.app`)
- * - Anti-Escape-Hatch search engine, translator, and archive mirror blockers
- * - Built-in Adult/NSFW TLDs and hostname keywords
- * - Known URL shorteners for Link Leash redirect resolution grace
+ * - Path-scoped platform evaluator driven by [BrowserPolicyConfig.pathScopedPlatformRules]
+ * - URL shortener redirect grace helper driven by [BrowserPolicyConfig.urlShortenerDomains]
+ *
+ * Note: `HM01` does not hardcode website blocklists by default; host apps inject their own
+ * domain, keyword, path, search-engine, and media lists via [BrowserPolicyConfig].
  */
 object DefaultBaselineLists {
 
@@ -69,83 +70,6 @@ object DefaultBaselineLists {
         "funcaptcha.com"
     )
 
-    val GOOGLE_ALLOWED_OAUTH_PATH_PREFIXES: List<String> = listOf(
-        "/o/oauth",
-        "/signin",
-        "/v3/signin",
-        "/accounts/",
-        "/servicelogin",
-        "/checkcookie",
-        "/mergesession",
-        "/recaptcha"
-    )
-
-    val FACEBOOK_ALLOWED_OAUTH_PATH_REGEXES: List<Regex> = listOf(
-        Regex("^/login.*", RegexOption.IGNORE_CASE),
-        Regex("^/dialog/oauth.*", RegexOption.IGNORE_CASE),
-        Regex("^/v[0-9.]+/dialog/oauth.*", RegexOption.IGNORE_CASE)
-    )
-
-    val GITHUB_ALLOWED_OAUTH_PATH_PREFIXES: List<String> = listOf(
-        "/login",
-        "/sessions",
-        "/settings/two_factor"
-    )
-
-    val SEARCH_ENGINE_AND_PROXY_DOMAINS: Set<String> = setOf(
-        "bing.com",
-        "duckduckgo.com",
-        "search.yahoo.com",
-        "search.brave.com",
-        "startpage.com",
-        "kagi.com",
-        "ecosia.org",
-        "qwant.com",
-        "baidu.com",
-        "translate.google.com",
-        "translate.goog",
-        "archive.org",
-        "web.archive.org",
-        "archive.is",
-        "archive.ph",
-        "archive.today",
-        "12ft.io"
-    )
-
-    val ADULT_TLDS: Set<String> = setOf(
-        ".xxx",
-        ".porn",
-        ".sex",
-        ".adult",
-        ".cam",
-        ".tube",
-        ".webcam",
-        ".sexy"
-    )
-
-    val ADULT_HOSTNAME_KEYWORDS: Set<String> = setOf(
-        "porn",
-        "xxx",
-        "rule34",
-        "hentai",
-        "onlyfans",
-        "fansly",
-        "chaturbate",
-        "redgifs",
-        "xvideos",
-        "xnxx",
-        "pornhub",
-        "xhamster",
-        "youporn",
-        "spankbang",
-        "brazzers",
-        "stripchat",
-        "livejasmin",
-        "myfreecams",
-        "nsfw",
-        "erome"
-    )
-
     val KNOWN_URL_SHORTENERS: Set<String> = setOf(
         "bit.ly",
         "bitly.com",
@@ -180,24 +104,21 @@ object DefaultBaselineLists {
         "^accounts\\.google\\.(?:com|co|org|net|[a-z]{2})(?:\\.[a-z]{2})?$",
         RegexOption.IGNORE_CASE
     )
-    private val YANDEX_DOMAIN_REGEX = Regex(
-        "^(?:.*\\.)?yandex\\.(?:com|ru|ua|by|kz|uz|com\\.tr|[a-z]{2,3})$",
-        RegexOption.IGNORE_CASE
-    )
-    private val SEARX_DOMAIN_REGEX = Regex(
-        "^(?:.*\\.)?searx(?:ng)?\\.[a-z.]+$",
-        RegexOption.IGNORE_CASE
-    )
 
     /**
      * Checks whether [rawHost] is a dedicated Trusted Identity Provider, Payment Gateway, or Captcha host.
      */
-    fun isDedicatedTrustedIdpOrPaymentOrCaptchaHost(rawHost: String): Boolean {
+    fun isDedicatedTrustedIdpOrPaymentOrCaptchaHost(
+        rawHost: String,
+        config: BrowserPolicyConfig? = null
+    ): Boolean {
         val host = normalizeHost(rawHost)
         if (host.isEmpty()) return false
-        if (host in EXACT_DEDICATED_IDP_PAYMENT_CAPTCHA_HOSTS) return true
+        val exactSet = config?.trustedIdpAndPaymentHosts ?: EXACT_DEDICATED_IDP_PAYMENT_CAPTCHA_HOSTS
+        val suffixSet = config?.trustedIdpAndPaymentSuffixes ?: SUFFIX_DEDICATED_IDP_PAYMENT_CAPTCHA_HOSTS
+        if (host in exactSet) return true
         if (ACCOUNTS_GOOGLE_REGEX.matches(host)) return true
-        return SUFFIX_DEDICATED_IDP_PAYMENT_CAPTCHA_HOSTS.any { suffix ->
+        return suffixSet.any { suffix ->
             host.endsWith(suffix) && host.length > suffix.length
         }
     }
@@ -224,8 +145,7 @@ object DefaultBaselineLists {
     }
 
     /**
-     * Result of evaluating a multi-purpose platform (`google.*`, `facebook.com`, `github.com`,
-     * `*.firebaseapp.com`, `*.web.app`).
+     * Result of evaluating a path-scoped platform rule.
      */
     enum class ScopedPlatformResult {
         NOT_APPLICABLE,
@@ -234,100 +154,83 @@ object DefaultBaselineLists {
     }
 
     /**
-     * Evaluates path-scoped multi-purpose platforms:
-     * - `google.*`: Only `/o/oauth...`, `/signin...`, `/v3/signin...`, `/accounts/...`, `/servicelogin...`,
-     *   `/checkcookie...`, `/mergesession...`, `/recaptcha...`
-     * - `facebook.com`: Only `/login...`, `/dialog/oauth...`, `/v.../dialog/oauth...`
-     * - `github.com`: Only `/login...`, `/sessions...`, `/settings/two_factor...`
-     * - `*.firebaseapp.com` / `*.web.app`: Only `/__/auth/...` (unless that exact tenant host is the
-     *   initial link opened by the user)
+     * Evaluates [rawHost] and [rawPath] against the configured [rules] (`BrowserPolicyConfig.pathScopedPlatformRules`).
      */
     fun evaluatePathScopedPlatform(
         rawHost: String,
         rawPath: String?,
-        initialLandingHost: String? = null
+        initialLandingHost: String? = null,
+        rules: List<PathScopedPlatformRule> = BrowserPolicyConfig.DEFAULT_EXAMPLE_PATH_SCOPED_RULES
     ): ScopedPlatformResult {
         val host = normalizeHost(rawHost)
+        if (host.isEmpty() || rules.isEmpty()) return ScopedPlatformResult.NOT_APPLICABLE
         val path = (rawPath?.takeIf { it.isNotEmpty() } ?: "/").lowercase(Locale.ROOT)
 
-        // 1. Google multi-purpose domains (excluding dedicated hosts like gds.google.com / translate.google.com)
-        if (isGoogleMultiPurposeHost(host)) {
-            val isAllowedPath = GOOGLE_ALLOWED_OAUTH_PATH_PREFIXES.any { prefix ->
-                path.startsWith(prefix)
-            }
-            return if (isAllowedPath) {
-                ScopedPlatformResult.ALLOWED_SCOPED_OAUTH
-            } else {
-                ScopedPlatformResult.BLOCKED_NON_OAUTH_PATH
-            }
-        }
+        for (rule in rules) {
+            if (!matchesRuleDomain(host, rule.domain)) continue
 
-        // 2. Facebook (facebook.com, www.facebook.com, m.facebook.com, web.facebook.com)
-        if (host == "facebook.com" || host.endsWith(".facebook.com")) {
-            val isAllowedPath = FACEBOOK_ALLOWED_OAUTH_PATH_REGEXES.any { regex ->
+            val matchesPrefix = rule.allowedPathPrefixes.any { prefix ->
+                path.startsWith(prefix.lowercase(Locale.ROOT))
+            }
+            val matchesRegex = rule.compiledAllowedPathRegexes.any { regex ->
                 regex.matches(path)
             }
-            return if (isAllowedPath) {
-                ScopedPlatformResult.ALLOWED_SCOPED_OAUTH
-            } else {
-                ScopedPlatformResult.BLOCKED_NON_OAUTH_PATH
-            }
-        }
 
-        // 3. GitHub (github.com, www.github.com)
-        if (host == "github.com" || host == "www.github.com") {
-            val isAllowedPath = GITHUB_ALLOWED_OAUTH_PATH_PREFIXES.any { prefix ->
-                path.startsWith(prefix)
-            }
-            return if (isAllowedPath) {
-                ScopedPlatformResult.ALLOWED_SCOPED_OAUTH
-            } else {
-                ScopedPlatformResult.BLOCKED_NON_OAUTH_PATH
-            }
-        }
-
-        // 4. Firebase Hosting (*.firebaseapp.com / *.web.app)
-        if ((host.endsWith(".firebaseapp.com") && host.length > ".firebaseapp.com".length) ||
-            (host.endsWith(".web.app") && host.length > ".web.app".length)
-        ) {
-            if (path.startsWith("/__/auth/")) {
+            if (matchesPrefix || matchesRegex) {
                 return ScopedPlatformResult.ALLOWED_SCOPED_OAUTH
             }
-            val normalizedInitial = initialLandingHost?.let { normalizeHost(it) }
-            return if (normalizedInitial != null && normalizedInitial == host) {
-                // Exact tenant host was the initial link opened by the user
-                ScopedPlatformResult.NOT_APPLICABLE
-            } else {
-                ScopedPlatformResult.BLOCKED_NON_OAUTH_PATH
+
+            if (rule.allowIfInitialLandingHost) {
+                val normalizedInitial = initialLandingHost?.let { normalizeHost(it) }
+                if (normalizedInitial != null && normalizedInitial == host) {
+                    return ScopedPlatformResult.NOT_APPLICABLE
+                }
             }
+
+            return ScopedPlatformResult.BLOCKED_NON_OAUTH_PATH
         }
 
         return ScopedPlatformResult.NOT_APPLICABLE
     }
 
+    private fun matchesRuleDomain(host: String, patternRaw: String): Boolean {
+        val pattern = patternRaw.trim().lowercase(Locale.ROOT)
+        if (pattern.isEmpty()) return false
+        if (pattern == "google.*") {
+            return isGoogleMultiPurposeHost(host)
+        }
+        if (pattern.startsWith("*.")) {
+            val suffix = pattern.removePrefix("*") // e.g. ".firebaseapp.com"
+            return host.endsWith(suffix) && host.length > suffix.length
+        }
+        return host == pattern || host == "www.$pattern" || host.endsWith(".$pattern")
+    }
+
     /**
-     * Checks whether [rawHost] and [rawPath] match a blocked search engine, web translator, or web archive mirror.
+     * Checks whether [rawHost] and [rawPath] match any developer-configured search engine or proxy domain.
      */
-    fun isSearchEngineOrProxy(rawHost: String, rawPath: String? = null): Boolean {
+    fun isSearchEngineOrProxy(
+        rawHost: String,
+        rawPath: String? = null,
+        searchDomains: Set<String> = emptySet()
+    ): Boolean {
         val host = normalizeHost(rawHost)
         if (host.isEmpty()) return false
         val path = (rawPath ?: "/").lowercase(Locale.ROOT)
 
-        // Google search paths on any google.* domain
-        if (isGoogleAnyHost(host) && (path.startsWith("/search") || path.startsWith("/url") || path.startsWith("/webhp"))) {
-            return true
-        }
-
-        // Exact or subdomain match against SEARCH_ENGINE_AND_PROXY_DOMAINS
-        if (SEARCH_ENGINE_AND_PROXY_DOMAINS.any { domain ->
-                host == domain || host.endsWith(".$domain")
-            }
+        // If google.* or search engine domains are configured, check Google search paths
+        if (searchDomains.isNotEmpty() &&
+            isGoogleAnyHost(host) &&
+            (path.startsWith("/search") || path.startsWith("/url") || path.startsWith("/webhp"))
         ) {
             return true
         }
 
-        // Yandex and Searx wildcard TLD families
-        if (YANDEX_DOMAIN_REGEX.matches(host) || SEARX_DOMAIN_REGEX.matches(host)) {
+        if (searchDomains.any { rawDomain ->
+                val domain = normalizeHost(rawDomain)
+                domain.isNotEmpty() && (host == domain || host.endsWith(".$domain"))
+            }
+        ) {
             return true
         }
 
@@ -335,29 +238,17 @@ object DefaultBaselineLists {
     }
 
     /**
-     * Checks whether [rawHost] matches the HM01 built-in Adult/NSFW TLD or hostname keyword list.
+     * Checks whether [rawHost] is a URL shortener in [shortenerDomains] that should receive redirect resolution grace.
      */
-    fun isBaselineAdultHost(rawHost: String): Boolean {
+    fun isKnownUrlShortener(
+        rawHost: String,
+        shortenerDomains: Set<String> = KNOWN_URL_SHORTENERS
+    ): Boolean {
         val host = normalizeHost(rawHost)
         if (host.isEmpty()) return false
-
-        if (ADULT_TLDS.any { tld -> host.endsWith(tld) }) {
-            return true
-        }
-
-        return ADULT_HOSTNAME_KEYWORDS.any { keyword ->
-            host.contains(keyword)
-        }
-    }
-
-    /**
-     * Checks whether [rawHost] is a known URL shortener that should receive redirect resolution grace.
-     */
-    fun isKnownUrlShortener(rawHost: String): Boolean {
-        val host = normalizeHost(rawHost)
-        if (host.isEmpty()) return false
-        return KNOWN_URL_SHORTENERS.any { shortener ->
-            host == shortener || host.endsWith(".$shortener")
+        return shortenerDomains.any { shortener ->
+            val clean = normalizeHost(shortener)
+            clean.isNotEmpty() && (host == clean || host.endsWith(".$clean"))
         }
     }
 

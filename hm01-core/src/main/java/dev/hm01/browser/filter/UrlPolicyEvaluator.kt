@@ -2,6 +2,7 @@ package dev.hm01.browser.filter
 
 import dev.hm01.browser.config.BrowserPolicyConfig
 import dev.hm01.browser.config.DefaultBaselineLists
+import dev.hm01.browser.config.DnsMode
 import dev.hm01.browser.dns.DohResolver
 import dev.hm01.browser.dns.DohVerdict
 import java.net.URI
@@ -29,7 +30,7 @@ enum class BlockReason(val title: String, val userMessage: String) {
     ),
     ADULT_BASELINE_BLOCK(
         "Restricted Content Blocked",
-        "This website is blocked by HM01's built-in safety policy."
+        "This website is blocked by your active TLD safety policy."
     ),
     HOST_BLOCKLIST_DOMAIN(
         "Blocked Website",
@@ -51,9 +52,13 @@ enum class BlockReason(val title: String, val userMessage: String) {
         "External Link Limit Reached",
         "HM01 stays focused on the link you opened and prevents multi-site web surfing."
     ),
+    DNS_NOT_SELECTED(
+        "DNS Filter Not Selected",
+        "Please select a DNS filter in Settings before opening web links."
+    ),
     DOH_FAMILY_FILTER_BLOCK(
-        "Blocked by Family Safety Filter",
-        "This domain was blocked by CleanBrowsing DNS family safety filtering."
+        "Blocked by DNS Safety Filter",
+        "This domain was blocked by your selected DNS safety filter."
     ),
     MEDIA_STREAM_BLOCKED(
         "Video & Audio Disabled",
@@ -95,11 +100,11 @@ sealed class PolicyDecision {
  * (`shouldInterceptRequest`) through the 6-step HM01 policy pipeline:
  *
  * 1. Scheme, IP-Literal & Native App Handoff
- * 2. Scoped OAuth & Trusted Identity Provider Allowlist
- * 3. Anti-Escape-Hatch (Search Engine & Proxy Blocker)
- * 4. Pluggable Blocklist (`HM01` Baseline + Host App Injection)
- * 5. "Link Leash" (External Domain Hop Policy & Multi-Tenant Cloud Isolation)
- * 6. CleanBrowsing Family Filter DoH Check
+ * 2. Scoped OAuth & Trusted Identity Provider Allowlist (driven by [BrowserPolicyConfig.pathScopedPlatformRules])
+ * 3. Search Engine & Proxy Blocker (driven by [BrowserPolicyConfig.searchEngineDomains])
+ * 4. Pluggable Blocklist (driven by [BrowserPolicyConfig.blockedDomains], [BrowserPolicyConfig.blockedHostKeywords], [BrowserPolicyConfig.blockedPathRegexes])
+ * 5. "Link Leash" (External Domain Hop Policy, optional via [BrowserPolicyConfig.maxExternalDomainHops])
+ * 6. User-Selected or Developer-Configured DNS-over-HTTPS Check
  */
 class UrlPolicyEvaluator(
     private val configProvider: () -> BrowserPolicyConfig = { BrowserPolicyConfig() },
@@ -147,8 +152,7 @@ class UrlPolicyEvaluator(
     }
 
     /**
-     * Marks that the landing page has finished its initial redirect chain (e.g. when a non-shortener
-     * landing page commits and finishes loading, or when the user initiates an in-page link click).
+     * Marks that the landing page has finished its initial redirect chain.
      */
     fun markRedirectGraceComplete() {
         synchronized(stateLock) {
@@ -160,10 +164,6 @@ class UrlPolicyEvaluator(
 
     /**
      * Evaluates a main-frame navigation request (`Intent` launch or `shouldOverrideUrlLoading`).
-     *
-     * @param rawUrl Target URL string.
-     * @param isInitialLaunch `true` if this is the initial `ACTION_VIEW` / Custom Tab launch URL.
-     * @param isServerRedirect `true` if `WebResourceRequest.isRedirect` is true (HTTP 301/302/307/308).
      */
     fun evaluateMainFrameNavigation(
         rawUrl: String,
@@ -194,7 +194,6 @@ class UrlPolicyEvaluator(
                 )
             }
 
-            // Check if this is a custom OAuth callback scheme (e.g. myapp://oauth, juubundpc://callback)
             if (isAllowedCustomCallbackScheme(scheme, config)) {
                 val targetPkg = config.customCallbackSchemes[scheme]?.targetPackage
                 return PolicyDecision.HandOffToNativeApp(
@@ -204,7 +203,6 @@ class UrlPolicyEvaluator(
                 )
             }
 
-            // Reject file://, javascript://, content://, data://, blob://, intent://, etc.
             return PolicyDecision.Block(
                 reason = BlockReason.INSECURE_OR_INVALID_SCHEME,
                 url = trimmedUrl,
@@ -223,12 +221,10 @@ class UrlPolicyEvaluator(
         val rawQuery = parsedUri?.rawQuery
         val pathWithQuery = if (!rawQuery.isNullOrEmpty()) "$rawPath?$rawQuery" else rawPath
 
-        // IP-Literal Blocking
         if (DomainExtractor.isIpLiteral(host)) {
             return PolicyDecision.Block(BlockReason.IP_LITERAL_NOT_ALLOWED, trimmedUrl, host)
         }
 
-        // Native App Handoff for https:// App Links (if a non-browser native app is installed for it)
         if (!isInitialLaunch && nativeAppHandlerDetector?.invoke(trimmedUrl) == true) {
             return PolicyDecision.HandOffToNativeApp(url = trimmedUrl, scheme = "https")
         }
@@ -240,14 +236,15 @@ class UrlPolicyEvaluator(
         // STEP 2: Scoped OAuth & Trusted Identity Provider Allowlist
         // =========================================================================
         val predictedInitialHost = synchronized(stateLock) {
-            initialLandingHost ?: if (!DefaultBaselineLists.isKnownUrlShortener(host)) host else null
+            initialLandingHost
+                ?: if (!DefaultBaselineLists.isKnownUrlShortener(host, config.urlShortenerDomains)) host else null
         }
 
-        // First check path-scoped multi-purpose platforms (google.*, facebook.com, github.com, *.firebaseapp.com, *.web.app)
         val scopedPlatformResult = DefaultBaselineLists.evaluatePathScopedPlatform(
             rawHost = host,
             rawPath = rawPath,
-            initialLandingHost = predictedInitialHost
+            initialLandingHost = predictedInitialHost,
+            rules = config.pathScopedPlatformRules
         )
         if (scopedPlatformResult == DefaultBaselineLists.ScopedPlatformResult.BLOCKED_NON_OAUTH_PATH &&
             !isExplicitlyAllowedOverride
@@ -257,19 +254,19 @@ class UrlPolicyEvaluator(
 
         val isTrustedIdpOrScopedOAuth =
             scopedPlatformResult == DefaultBaselineLists.ScopedPlatformResult.ALLOWED_SCOPED_OAUTH ||
-                DefaultBaselineLists.isDedicatedTrustedIdpOrPaymentOrCaptchaHost(host)
+                DefaultBaselineLists.isDedicatedTrustedIdpOrPaymentOrCaptchaHost(host, config)
 
         // =========================================================================
-        // STEP 3: Anti-Escape-Hatch (Search Engine & Proxy Blocker)
+        // STEP 3: Search Engine & Proxy Blocker (Developer-Configured)
         // =========================================================================
         if (config.blockSearchEngines && !isExplicitlyAllowedOverride) {
-            if (DefaultBaselineLists.isSearchEngineOrProxy(host, rawPath)) {
+            if (DefaultBaselineLists.isSearchEngineOrProxy(host, rawPath, config.searchEngineDomains)) {
                 return PolicyDecision.Block(BlockReason.SEARCH_ENGINE_OR_PROXY, trimmedUrl, host)
             }
         }
 
         // =========================================================================
-        // STEP 4: Pluggable Blocklist (HM01 Baseline + Host App Injection)
+        // STEP 4: Pluggable Blocklist (Developer-Configured)
         // =========================================================================
         if (!isExplicitlyAllowedOverride) {
             val blocklistDecision = evaluateBlocklists(trimmedUrl, host, effectiveDomain, pathWithQuery, config)
@@ -287,11 +284,11 @@ class UrlPolicyEvaluator(
             }
 
             if (!isTrustedIdpOrScopedOAuth) {
-                val isShortener = DefaultBaselineLists.isKnownUrlShortener(host)
+                val isShortener = DefaultBaselineLists.isKnownUrlShortener(host, config.urlShortenerDomains)
+                val maxHops = config.maxExternalDomainHops
 
                 if (landingEffectiveDomain == null) {
                     if (!isShortener) {
-                        // First non-shortener domain becomes the Landing Registrable Domain
                         landingEffectiveDomain = effectiveDomain
                         initialLandingHost = host
                         if (!isServerRedirect && !isInitialLaunch) {
@@ -299,19 +296,17 @@ class UrlPolicyEvaluator(
                         }
                     }
                 } else if (inRedirectResolutionGrace && isServerRedirect && !isShortener && externalDomainHops == 0) {
-                    // Initial HTTP 301/302/307/308 redirect chain resolving to the final landing domain
                     landingEffectiveDomain = effectiveDomain
                     initialLandingHost = host
                 } else {
                     val currentLanding = landingEffectiveDomain!!
                     if (effectiveDomain != currentLanding) {
-                        // Navigating to an external domain outside the landing domain
                         inRedirectResolutionGrace = false
                         if (effectiveDomain == currentExternalDomain) {
                             // Browsing within the already-entered allowed external domain
                         } else {
                             val nextExternalHops = externalDomainHops + 1
-                            if (nextExternalHops > config.maxExternalDomainHops) {
+                            if (maxHops != null && nextExternalHops > maxHops) {
                                 return PolicyDecision.Block(
                                     reason = BlockReason.LINK_LEASH_HOP_LIMIT_EXCEEDED,
                                     url = trimmedUrl,
@@ -329,12 +324,18 @@ class UrlPolicyEvaluator(
         }
 
         // =========================================================================
-        // STEP 6: CleanBrowsing Family Filter DoH Check
+        // STEP 6: DNS-over-HTTPS Safety Check
         // =========================================================================
-        if (!isExplicitlyAllowedOverride) {
-            val dohVerdict = dohResolver.resolve(host)
-            if (dohVerdict == DohVerdict.BLOCK) {
-                return PolicyDecision.Block(BlockReason.DOH_FAMILY_FILTER_BLOCK, trimmedUrl, host)
+        if (!isExplicitlyAllowedOverride && config.dnsMode != DnsMode.DISABLED) {
+            val activeDohUrl = config.resolveActiveDohEndpointUrl()
+            if (config.dnsMode == DnsMode.USER_DEFINED && activeDohUrl.isBlank()) {
+                return PolicyDecision.Block(BlockReason.DNS_NOT_SELECTED, trimmedUrl, host)
+            }
+            if (activeDohUrl.isNotBlank()) {
+                val dohVerdict = dohResolver.resolve(host)
+                if (dohVerdict == DohVerdict.BLOCK) {
+                    return PolicyDecision.Block(BlockReason.DOH_FAMILY_FILTER_BLOCK, trimmedUrl, host)
+                }
             }
         }
 
@@ -348,13 +349,6 @@ class UrlPolicyEvaluator(
 
     /**
      * Evaluates a background sub-resource request (`shouldInterceptRequest`).
-     *
-     * Enforces:
-     * - HTTPS-only (cleartext `http://` sub-resources are rejected)
-     * - IP-literal blocking
-     * - MediaStreamBlocker (video/audio extensions, `Accept`, `Sec-Fetch-Dest`, `Range`)
-     * - Anti-Escape-Hatch & Pluggable Blocklists
-     * - CleanBrowsing Family Filter DoH Check (using the shared LRU+TTL cache with coalesced lookups)
      */
     fun evaluateSubResourceRequest(
         rawUrl: String,
@@ -400,12 +394,12 @@ class UrlPolicyEvaluator(
 
         // Search engine / proxy check
         if (config.blockSearchEngines && !isExplicitlyAllowedOverride) {
-            if (DefaultBaselineLists.isSearchEngineOrProxy(host, rawPath)) {
+            if (DefaultBaselineLists.isSearchEngineOrProxy(host, rawPath, config.searchEngineDomains)) {
                 return PolicyDecision.Block(BlockReason.SEARCH_ENGINE_OR_PROXY, trimmedUrl, host)
             }
         }
 
-        // Pluggable blocklists (HM01 Adult Baseline + Host-Injected Blocklist)
+        // Pluggable blocklists
         if (!isExplicitlyAllowedOverride) {
             val blocklistDecision = evaluateBlocklists(trimmedUrl, host, effectiveDomain, pathWithQuery, config)
             if (blocklistDecision != null) {
@@ -413,11 +407,17 @@ class UrlPolicyEvaluator(
             }
         }
 
-        // CleanBrowsing Family Filter DoH check
-        if (!isExplicitlyAllowedOverride) {
-            val dohVerdict = dohResolver.resolve(host)
-            if (dohVerdict == DohVerdict.BLOCK) {
-                return PolicyDecision.Block(BlockReason.DOH_FAMILY_FILTER_BLOCK, trimmedUrl, host)
+        // DoH check
+        if (!isExplicitlyAllowedOverride && config.dnsMode != DnsMode.DISABLED) {
+            val activeDohUrl = config.resolveActiveDohEndpointUrl()
+            if (config.dnsMode == DnsMode.USER_DEFINED && activeDohUrl.isBlank()) {
+                return PolicyDecision.Block(BlockReason.DNS_NOT_SELECTED, trimmedUrl, host)
+            }
+            if (activeDohUrl.isNotBlank()) {
+                val dohVerdict = dohResolver.resolve(host)
+                if (dohVerdict == DohVerdict.BLOCK) {
+                    return PolicyDecision.Block(BlockReason.DOH_FAMILY_FILTER_BLOCK, trimmedUrl, host)
+                }
             }
         }
 
@@ -435,17 +435,23 @@ class UrlPolicyEvaluator(
         pathWithQuery: String,
         config: BrowserPolicyConfig
     ): PolicyDecision.Block? {
-        // 1. HM01 Open-Source Baseline Adult TLDs & Keywords
-        if (DefaultBaselineLists.isBaselineAdultHost(host)) {
+        // 1. Developer-Injected Blocked TLDs (e.g. ".xxx", ".porn")
+        if (config.blockedTlds.any { rawTld ->
+                val tld = rawTld.trim().lowercase(Locale.ROOT).let {
+                    if (it.startsWith(".")) it else ".$it"
+                }
+                tld.length > 1 && host.endsWith(tld)
+            }
+        ) {
             return PolicyDecision.Block(BlockReason.ADULT_BASELINE_BLOCK, url, host)
         }
 
-        // 2. Host-Injected Blocked Domains (exact domain + subdomain suffix match)
+        // 2. Developer-Injected Blocked Domains (exact domain + subdomain suffix match)
         if (isDomainInSet(host, effectiveDomain, config.blockedDomains)) {
             return PolicyDecision.Block(BlockReason.HOST_BLOCKLIST_DOMAIN, url, host)
         }
 
-        // 3. Host-Injected Blocked Host Keywords
+        // 3. Developer-Injected Blocked Host Keywords
         if (config.blockedHostKeywords.any { keyword ->
                 val cleanKeyword = keyword.trim().lowercase(Locale.ROOT)
                 cleanKeyword.isNotEmpty() && host.contains(cleanKeyword)
@@ -454,7 +460,7 @@ class UrlPolicyEvaluator(
             return PolicyDecision.Block(BlockReason.HOST_BLOCKLIST_KEYWORD, url, host)
         }
 
-        // 4. Host-Injected Blocked Path Regexes (e.g., /reels, /shorts, /watch, /feeds, /r/, /trending)
+        // 4. Developer-Injected Blocked Path Regexes
         if (config.compiledBlockedPathRegexes.any { regex ->
                 regex.containsMatchIn(pathWithQuery)
             }
@@ -482,8 +488,7 @@ class UrlPolicyEvaluator(
             "http", "https", "file", "javascript", "data", "content", "blob", "about", "intent", "market", "tel", "sms", "mailto"
         )
         if (scheme in disallowedSchemes) return false
-        if (config.customCallbackSchemes.containsKey(scheme)) return true
-        // Standard RFC 8252 custom-URI scheme OAuth callbacks (e.g. com.example.app://oauth2redirect, myapp://oauth)
+        if (config.customCallbackSchemes.containsKey(scheme)) return false.not()
         return scheme.matches(Regex("^[a-z][a-z0-9+.-]*$"))
     }
 
