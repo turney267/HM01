@@ -166,6 +166,8 @@ object DefaultBaselineLists {
         "dlvr.it",
         "fb.me",
         "amzn.to",
+        "amzn.asia",
+        "a.co",
         "g.co",
         "goo.gl"
     )

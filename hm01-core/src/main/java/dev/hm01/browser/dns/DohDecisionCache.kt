@@ -3,6 +3,7 @@ package dev.hm01.browser.dns
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
@@ -99,7 +100,10 @@ class DohDecisionCache(
                 ourFuture.complete(cached)
                 return cached
             }
-            val verdict = lookup(key)
+            // Always execute network lookup on the background DoH executor so calls from
+            // Android's Main UI thread never throw android.os.NetworkOnMainThreadException.
+            val lookupFuture = CompletableFuture.supplyAsync({ lookup(key) }, DOH_NETWORK_EXECUTOR)
+            val verdict = lookupFuture.get(timeoutMs, TimeUnit.MILLISECONDS)
             if (cacheResult(verdict)) {
                 put(key, verdict)
             }
@@ -144,5 +148,8 @@ class DohDecisionCache(
     companion object {
         const val DEFAULT_MAX_ENTRIES: Int = 2_000
         const val DEFAULT_TTL_MS: Long = 30L * 60L * 1000L // 30 minutes
+        private val DOH_NETWORK_EXECUTOR = Executors.newCachedThreadPool { runnable ->
+            Thread(runnable, "hm01-doh-worker").apply { isDaemon = true }
+        }
     }
 }
