@@ -36,6 +36,7 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import dev.hm01.browser.config.BrowserPolicyConfig
 import dev.hm01.browser.config.BrowserPolicyProvider
+import dev.hm01.browser.config.DnsMode
 import dev.hm01.browser.filter.MediaStreamBlocker
 import dev.hm01.browser.filter.PolicyDecision
 import dev.hm01.browser.filter.UrlPolicyEvaluator
@@ -101,6 +102,32 @@ class IntentBrowserActivity : Activity() {
             return
         }
 
+        activeConfig = BrowserPolicyProvider.getConfig(applicationContext)
+        if (activeConfig.dnsMode == DnsMode.USER_DEFINED &&
+            activeConfig.resolveActiveDohEndpointUrl().isBlank()
+        ) {
+            val promptHandler = BrowserPolicyProvider.getDnsSelectionPromptHandler()
+            if (promptHandler != null) {
+                promptHandler.onPromptDnsSelection(
+                    activity = this,
+                    onDnsSelected = {
+                        activeConfig = BrowserPolicyProvider.getConfig(applicationContext)
+                        policyEvaluator.resetSession()
+                        scheduleSessionTimeout()
+                        evaluateAndOpenInitialUrl(rawUrl)
+                    },
+                    onCancelled = {
+                        closeAndWipeSession()
+                    }
+                )
+                return
+            }
+        }
+
+        evaluateAndOpenInitialUrl(rawUrl)
+    }
+
+    private fun evaluateAndOpenInitialUrl(rawUrl: String) {
         val initialDecision = policyEvaluator.evaluateMainFrameNavigation(
             rawUrl = rawUrl,
             isInitialLaunch = true,

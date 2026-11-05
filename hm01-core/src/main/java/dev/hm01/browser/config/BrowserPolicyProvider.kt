@@ -1,9 +1,23 @@
 package dev.hm01.browser.config
 
+import android.app.Activity
 import android.content.Context
 import android.content.RestrictionsManager
 import android.os.Bundle
 import dev.hm01.browser.dns.DohResolver
+
+/**
+ * Callback interface allowing a host application (such as Juubun) to present its own native
+ * DNS selection popup the first time the user opens a link when [DnsMode.USER_DEFINED] is active
+ * and no DNS provider has been chosen yet.
+ */
+fun interface DnsSelectionPromptHandler {
+    fun onPromptDnsSelection(
+        activity: Activity,
+        onDnsSelected: () -> Unit,
+        onCancelled: () -> Unit
+    )
+}
 
 /**
  * Singleton policy provider and DI hook for `HM01`.
@@ -30,6 +44,24 @@ object BrowserPolicyProvider {
 
     @Volatile
     private var userSelectedDnsUrl: String? = null
+
+    @Volatile
+    private var dnsSelectionPromptHandler: DnsSelectionPromptHandler? = null
+
+    /**
+     * Registers a host-provided [DnsSelectionPromptHandler] to display a first-time DNS selection
+     * popup when [DnsMode.USER_DEFINED] has no selected DNS server yet.
+     */
+    @JvmStatic
+    fun setDnsSelectionPromptHandler(handler: DnsSelectionPromptHandler?) {
+        dnsSelectionPromptHandler = handler
+    }
+
+    /**
+     * Returns the registered [DnsSelectionPromptHandler], if any.
+     */
+    @JvmStatic
+    fun getDnsSelectionPromptHandler(): DnsSelectionPromptHandler? = dnsSelectionPromptHandler
 
     /**
      * Programmatically sets the active [BrowserPolicyConfig].
@@ -137,6 +169,7 @@ object BrowserPolicyProvider {
         customDohResolver = null
         userSelectedDnsId = null
         userSelectedDnsUrl = null
+        dnsSelectionPromptHandler = null
     }
 
     /**
