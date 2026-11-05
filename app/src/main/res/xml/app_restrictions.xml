@@ -9,15 +9,6 @@
         android:title="@string/restriction_brand_title_title" />
 
     <restriction
-        android:defaultValue="CLEANBROWSING_FAMILY"
-        android:description="@string/restriction_doh_preset_desc"
-        android:entries="@array/doh_preset_entries"
-        android:entryValues="@array/doh_preset_values"
-        android:key="doh_preset"
-        android:restrictionType="choice"
-        android:title="@string/restriction_doh_preset_title" />
-
-    <restriction
         android:defaultValue=""
         android:description="@string/restriction_custom_doh_url_desc"
         android:key="custom_doh_url"

@@ -5,25 +5,8 @@
     <string name="restriction_brand_title_title">Brand Title</string>
     <string name="restriction_brand_title_desc">Header title displayed on policy screens.</string>
 
-    <string name="restriction_doh_preset_title">CleanBrowsing DoH Filter Preset</string>
-    <string name="restriction_doh_preset_desc">Selects the DNS-over-HTTPS filter level.</string>
-
-    <string-array name="doh_preset_entries">
-        <item>CleanBrowsing Family Filter (Default)</item>
-        <item>CleanBrowsing Adult Filter</item>
-        <item>CleanBrowsing Security Filter</item>
-        <item>Custom DoH Endpoint</item>
-    </string-array>
-
-    <string-array name="doh_preset_values">
-        <item>CLEANBROWSING_FAMILY</item>
-        <item>CLEANBROWSING_ADULT</item>
-        <item>CLEANBROWSING_SECURITY</item>
-        <item>CUSTOM</item>
-    </string-array>
-
-    <string name="restriction_custom_doh_url_title">Custom DoH Endpoint URL</string>
-    <string name="restriction_custom_doh_url_desc">RFC 8484 HTTPS endpoint when preset is set to CUSTOM.</string>
+    <string name="restriction_custom_doh_url_title">DNS-over-HTTPS (DoH) Endpoint URL</string>
+    <string name="restriction_custom_doh_url_desc">RFC 8484 HTTPS DNS-over-HTTPS endpoint URL.</string>
 
     <string name="restriction_fail_closed_dns_title">Fail Closed on DNS Error</string>
     <string name="restriction_fail_closed_dns_desc">Block non-IdP domains if the DoH server is unreachable.</string>
@@ -41,7 +24,7 @@
     <string name="restriction_allowed_domains_override_desc">Comma-separated list of domains explicitly permitted.</string>
 
     <string name="restriction_max_external_hops_title">Max External Domain Hops (Link Leash)</string>
-    <string name="restriction_max_external_hops_desc">Maximum number of external domain hops permitted from the landing domain.</string>
+    <string name="restriction_max_external_hops_desc">Maximum number of external domain hops permitted from the landing domain (-1 to disable).</string>
 
     <string name="restriction_max_total_hops_title">Max Total Navigation Hops</string>
     <string name="restriction_max_total_hops_desc">Maximum total main-frame navigations allowed in a single session.</string>
@@ -50,11 +33,11 @@
     <string name="restriction_session_timeout_desc">Automatically closes and wipes the browser session after this duration.</string>
 
     <string name="restriction_block_video_audio_title">Block Video and Audio Streams</string>
-    <string name="restriction_block_video_audio_desc">Blocks video/audio files, media headers, MSE, WebRTC, and HTML5 media playback.</string>
+    <string name="restriction_block_video_audio_desc">Blocks configured video/audio extensions, media headers, MSE, WebRTC, and HTML5 media playback.</string>
 
     <string name="restriction_cap_image_dimensions_title">Cap Image Dimensions</string>
     <string name="restriction_cap_image_dimensions_desc">Restricts maximum rendered image dimensions to 240x240px.</string>
 
-    <string name="restriction_block_search_engines_title">Block Search Engines &amp; Web Proxies</string>
-    <string name="restriction_block_search_engines_desc">Blocks Google Search, Bing, DuckDuckGo, web translators, and archive mirrors.</string>
+    <string name="restriction_block_search_engines_title">Block Configured Search Engines &amp; Proxies</string>
+    <string name="restriction_block_search_engines_desc">Blocks navigation to developer-configured search engine and proxy domains.</string>
 </resources>
