@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HM01</string>
+
+    <string name="restriction_brand_title_title">Brand Title</string>
+    <string name="restriction_brand_title_desc">Header title displayed on policy screens.</string>
+
+    <string name="restriction_doh_preset_title">CleanBrowsing DoH Filter Preset</string>
+    <string name="restriction_doh_preset_desc">Selects the DNS-over-HTTPS filter level.</string>
+
+    <string-array name="doh_preset_entries">
+        <item>CleanBrowsing Family Filter (Default)</item>
+        <item>CleanBrowsing Adult Filter</item>
+        <item>CleanBrowsing Security Filter</item>
+        <item>Custom DoH Endpoint</item>
+    </string-array>
+
+    <string-array name="doh_preset_values">
+        <item>CLEANBROWSING_FAMILY</item>
+        <item>CLEANBROWSING_ADULT</item>
+        <item>CLEANBROWSING_SECURITY</item>
+        <item>CUSTOM</item>
+    </string-array>
+
+    <string name="restriction_custom_doh_url_title">Custom DoH Endpoint URL</string>
+    <string name="restriction_custom_doh_url_desc">RFC 8484 HTTPS endpoint when preset is set to CUSTOM.</string>
+
+    <string name="restriction_fail_closed_dns_title">Fail Closed on DNS Error</string>
+    <string name="restriction_fail_closed_dns_desc">Block non-IdP domains if the DoH server is unreachable.</string>
+
+    <string name="restriction_blocked_domains_title">Blocked Domains</string>
+    <string name="restriction_blocked_domains_desc">Comma-separated list of domains to block (e.g. reddit.com, substack.com).</string>
+
+    <string name="restriction_blocked_keywords_title">Blocked Hostname Keywords</string>
+    <string name="restriction_blocked_keywords_desc">Comma-separated list of hostname keywords to block.</string>
+
+    <string name="restriction_blocked_path_regexes_title">Blocked Path Regexes</string>
+    <string name="restriction_blocked_path_regexes_desc">Comma-separated list of URL path regex patterns to block (e.g. /reels, /shorts).</string>
+
+    <string name="restriction_allowed_domains_override_title">Allowed Domains Override</string>
+    <string name="restriction_allowed_domains_override_desc">Comma-separated list of domains explicitly permitted.</string>
+
+    <string name="restriction_max_external_hops_title">Max External Domain Hops (Link Leash)</string>
+    <string name="restriction_max_external_hops_desc">Maximum number of external domain hops permitted from the landing domain.</string>
+
+    <string name="restriction_max_total_hops_title">Max Total Navigation Hops</string>
+    <string name="restriction_max_total_hops_desc">Maximum total main-frame navigations allowed in a single session.</string>
+
+    <string name="restriction_session_timeout_title">Session Timeout (Seconds)</string>
+    <string name="restriction_session_timeout_desc">Automatically closes and wipes the browser session after this duration.</string>
+
+    <string name="restriction_block_video_audio_title">Block Video and Audio Streams</string>
+    <string name="restriction_block_video_audio_desc">Blocks video/audio files, media headers, MSE, WebRTC, and HTML5 media playback.</string>
+
+    <string name="restriction_cap_image_dimensions_title">Cap Image Dimensions</string>
+    <string name="restriction_cap_image_dimensions_desc">Restricts maximum rendered image dimensions to 240x240px.</string>
+
+    <string name="restriction_block_search_engines_title">Block Search Engines &amp; Web Proxies</string>
+    <string name="restriction_block_search_engines_desc">Blocks Google Search, Bing, DuckDuckGo, web translators, and archive mirrors.</string>
+</resources>

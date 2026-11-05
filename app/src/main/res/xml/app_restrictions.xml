@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<restrictions xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <restriction
+        android:defaultValue="HM01"
+        android:description="@string/restriction_brand_title_desc"
+        android:key="brand_title"
+        android:restrictionType="string"
+        android:title="@string/restriction_brand_title_title" />
+
+    <restriction
+        android:defaultValue="CLEANBROWSING_FAMILY"
+        android:description="@string/restriction_doh_preset_desc"
+        android:entries="@array/doh_preset_entries"
+        android:entryValues="@array/doh_preset_values"
+        android:key="doh_preset"
+        android:restrictionType="choice"
+        android:title="@string/restriction_doh_preset_title" />
+
+    <restriction
+        android:defaultValue=""
+        android:description="@string/restriction_custom_doh_url_desc"
+        android:key="custom_doh_url"
+        android:restrictionType="string"
+        android:title="@string/restriction_custom_doh_url_title" />
+
+    <restriction
+        android:defaultValue="false"
+        android:description="@string/restriction_fail_closed_dns_desc"
+        android:key="fail_closed_on_dns_error"
+        android:restrictionType="bool"
+        android:title="@string/restriction_fail_closed_dns_title" />
+
+    <restriction
+        android:defaultValue=""
+        android:description="@string/restriction_blocked_domains_desc"
+        android:key="blocked_domains"
+        android:restrictionType="string"
+        android:title="@string/restriction_blocked_domains_title" />
+
+    <restriction
+        android:defaultValue=""
+        android:description="@string/restriction_blocked_keywords_desc"
+        android:key="blocked_keywords"
+        android:restrictionType="string"
+        android:title="@string/restriction_blocked_keywords_title" />
+
+    <restriction
+        android:defaultValue=""
+        android:description="@string/restriction_blocked_path_regexes_desc"
+        android:key="blocked_path_regexes"
+        android:restrictionType="string"
+        android:title="@string/restriction_blocked_path_regexes_title" />
+
+    <restriction
+        android:defaultValue=""
+        android:description="@string/restriction_allowed_domains_override_desc"
+        android:key="allowed_domains_override"
+        android:restrictionType="string"
+        android:title="@string/restriction_allowed_domains_override_title" />
+
+    <restriction
+        android:defaultValue="1"
+        android:description="@string/restriction_max_external_hops_desc"
+        android:key="max_external_domain_hops"
+        android:restrictionType="integer"
+        android:title="@string/restriction_max_external_hops_title" />
+
+    <restriction
+        android:defaultValue="45"
+        android:description="@string/restriction_max_total_hops_desc"
+        android:key="max_total_navigation_hops"
+        android:restrictionType="integer"
+        android:title="@string/restriction_max_total_hops_title" />
+
+    <restriction
+        android:defaultValue="600"
+        android:description="@string/restriction_session_timeout_desc"
+        android:key="session_timeout_seconds"
+        android:restrictionType="integer"
+        android:title="@string/restriction_session_timeout_title" />
+
+    <restriction
+        android:defaultValue="true"
+        android:description="@string/restriction_block_video_audio_desc"
+        android:key="block_video_audio"
+        android:restrictionType="bool"
+        android:title="@string/restriction_block_video_audio_title" />
+
+    <restriction
+        android:defaultValue="false"
+        android:description="@string/restriction_cap_image_dimensions_desc"
+        android:key="cap_image_dimensions"
+        android:restrictionType="bool"
+        android:title="@string/restriction_cap_image_dimensions_title" />
+
+    <restriction
+        android:defaultValue="true"
+        android:description="@string/restriction_block_search_engines_desc"
+        android:key="block_search_engines"
+        android:restrictionType="bool"
+        android:title="@string/restriction_block_search_engines_title" />
+
+</restrictions>
