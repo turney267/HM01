@@ -356,13 +356,24 @@ class Hm03AcceptanceUnitTest {
             dohResolver = createAllowAllDohResolver()
         )
 
-        // 1. Google OAuth sign-in paths are allowed
+        // 1. Google OAuth sign-in paths & regional accounts.google.<ccTLD> cookie/session endpoints are allowed
         val googleOAuth = evaluator.evaluateMainFrameNavigation(
             "https://accounts.google.com/o/oauth2/v2/auth?client_id=123&redirect_uri=exampleapp://oauth",
             isInitialLaunch = true
         )
         assertTrue(googleOAuth is PolicyDecision.Allow)
         assertTrue((googleOAuth as PolicyDecision.Allow).isTrustedIdpOrScopedOAuth)
+
+        for (regionalAuthUrl in listOf(
+            "https://accounts.google.com.au/accounts/SetSID?ssdc=1",
+            "https://accounts.google.com.au/CookieMismatch",
+            "https://accounts.google.com.au/InteractiveLogin",
+            "https://accounts.google.com/_/signin/challenge"
+        )) {
+            val regionalDecision = evaluator.evaluateMainFrameNavigation(regionalAuthUrl)
+            assertTrue("Expected $regionalAuthUrl to be allowed", regionalDecision is PolicyDecision.Allow)
+            assertTrue((regionalDecision as PolicyDecision.Allow).isTrustedIdpOrScopedOAuth)
+        }
 
         // 2. Facebook OAuth dialog is allowed
         val fbOAuth = evaluator.evaluateMainFrameNavigation(

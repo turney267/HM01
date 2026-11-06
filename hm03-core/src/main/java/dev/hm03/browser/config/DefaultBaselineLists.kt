@@ -18,6 +18,7 @@ object DefaultBaselineLists {
     val EXACT_DEDICATED_IDP_PAYMENT_CAPTCHA_HOSTS: Set<String> = setOf(
         // Google dedicated OAuth / identity hosts
         "gds.google.com",
+        "myaccount.google.com",
         "oauthaccountmanager.googleapis.com",
         // Apple, Microsoft, Yahoo
         "appleid.apple.com",
@@ -99,7 +100,7 @@ object DefaultBaselineLists {
     )
 
     private val GOOGLE_DOMAIN_REGEX = Regex(
-        "^(?:www\\.|accounts\\.|m\\.)?google\\.(?:com|co|org|net|[a-z]{2})(?:\\.[a-z]{2})?$",
+        "^(?:www\\.|m\\.)?google\\.(?:com|co|org|net|[a-z]{2})(?:\\.[a-z]{2})?$",
         RegexOption.IGNORE_CASE
     )
     private val ACCOUNTS_GOOGLE_REGEX = Regex(
@@ -166,6 +167,11 @@ object DefaultBaselineLists {
     ): ScopedPlatformResult {
         val host = normalizeHost(rawHost)
         if (host.isEmpty() || rules.isEmpty()) return ScopedPlatformResult.NOT_APPLICABLE
+        // Dedicated Identity Providers (e.g. accounts.google.com, accounts.google.com.au, appleid.apple.com)
+        // are exclusively authentication hosts and must never be blocked as non-OAuth platform paths.
+        if (ACCOUNTS_GOOGLE_REGEX.matches(host) || host in EXACT_DEDICATED_IDP_PAYMENT_CAPTCHA_HOSTS) {
+            return ScopedPlatformResult.ALLOWED_SCOPED_OAUTH
+        }
         val normalizedPath = CanonicalUrl.normalizePathForPolicy(rawPath)?.lowercase(Locale.ROOT)
 
         for (rule in rules) {

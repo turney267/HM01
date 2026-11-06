@@ -284,7 +284,14 @@ class UrlPolicyEvaluator(
         // STEP 4: Pluggable Blocklist (Developer-Configured)
         // =========================================================================
         if (!isExplicitlyAllowedOverride) {
-            val blocklistDecision = evaluateBlocklists(canonicalUrl, host, effectiveDomain, pathWithQuery, config)
+            val blocklistDecision = evaluateBlocklists(
+                url = canonicalUrl,
+                host = host,
+                effectiveDomain = effectiveDomain,
+                pathWithQuery = pathWithQuery,
+                config = config,
+                isAllowedScopedOAuth = scopedPlatformResult == DefaultBaselineLists.ScopedPlatformResult.ALLOWED_SCOPED_OAUTH
+            )
             if (blocklistDecision != null) {
                 return blocklistDecision
             }
@@ -500,7 +507,14 @@ class UrlPolicyEvaluator(
 
         // Pluggable blocklists
         if (!isExplicitlyAllowedOverride) {
-            val blocklistDecision = evaluateBlocklists(canonicalUrl, host, effectiveDomain, pathWithQuery, config)
+            val blocklistDecision = evaluateBlocklists(
+                url = canonicalUrl,
+                host = host,
+                effectiveDomain = effectiveDomain,
+                pathWithQuery = pathWithQuery,
+                config = config,
+                isAllowedScopedOAuth = scopedPlatformResult == DefaultBaselineLists.ScopedPlatformResult.ALLOWED_SCOPED_OAUTH
+            )
             if (blocklistDecision != null) {
                 return blocklistDecision
             }
@@ -563,7 +577,8 @@ class UrlPolicyEvaluator(
         host: String,
         effectiveDomain: String,
         pathWithQuery: String,
-        config: BrowserPolicyConfig
+        config: BrowserPolicyConfig,
+        isAllowedScopedOAuth: Boolean = false
     ): PolicyDecision.Block? {
         // 1. Developer-Injected Blocked TLDs (e.g. ".xxx", ".porn")
         if (config.blockedTlds.any { rawTld ->
@@ -577,7 +592,7 @@ class UrlPolicyEvaluator(
         }
 
         // 2. Developer-Injected Blocked Domains (exact domain + subdomain suffix match)
-        if (isDomainInSet(host, effectiveDomain, config.blockedDomains)) {
+        if (!isAllowedScopedOAuth && isDomainInSet(host, effectiveDomain, config.blockedDomains)) {
             return PolicyDecision.Block(BlockReason.HOST_BLOCKLIST_DOMAIN, url, host)
         }
 
