@@ -368,7 +368,9 @@ class Hm03AcceptanceUnitTest {
             "https://accounts.google.com.au/accounts/SetSID?ssdc=1",
             "https://accounts.google.com.au/CookieMismatch",
             "https://accounts.google.com.au/InteractiveLogin",
-            "https://accounts.google.com/_/signin/challenge"
+            "https://accounts.google.com/_/signin/challenge",
+            "https://accounts.youtube.com/accounts/SetSID?ssdc=1",
+            "https://accounts.youtube.com/accounts/CheckConnection?pmpo=https://accounts.google.com"
         )) {
             val regionalDecision = evaluator.evaluateMainFrameNavigation(regionalAuthUrl)
             assertTrue("Expected $regionalAuthUrl to be allowed", regionalDecision is PolicyDecision.Allow)

@@ -16,15 +16,20 @@ import java.util.Locale
 object DefaultBaselineLists {
 
     val EXACT_DEDICATED_IDP_PAYMENT_CAPTCHA_HOSTS: Set<String> = setOf(
-        // Google dedicated OAuth / identity hosts
+        // Google dedicated OAuth / identity & cookie-sync hosts
         "gds.google.com",
         "myaccount.google.com",
+        "accounts.youtube.com",
         "oauthaccountmanager.googleapis.com",
         // Apple, Microsoft, Yahoo
         "appleid.apple.com",
         "idmsa.apple.com",
+        "gsa.apple.com",
         "login.microsoftonline.com",
         "login.live.com",
+        "account.live.com",
+        "account.microsoft.com",
+        "login.windows.net",
         "login.yahoo.com",
         // Payment & Checkout
         "checkout.stripe.com",

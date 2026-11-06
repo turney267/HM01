@@ -274,7 +274,7 @@ class UrlPolicyEvaluator(
         // =========================================================================
         // STEP 3: Search Engine & Proxy Blocker (Developer-Configured)
         // =========================================================================
-        if (config.blockSearchEngines && !isExplicitlyAllowedOverride) {
+        if (config.blockSearchEngines && !isExplicitlyAllowedOverride && !isTrustedIdpOrScopedOAuth) {
             if (DefaultBaselineLists.isSearchEngineOrProxy(host, normalizedPath, config.searchEngineDomains)) {
                 return PolicyDecision.Block(BlockReason.SEARCH_ENGINE_OR_PROXY, canonicalUrl, host)
             }
@@ -290,7 +290,7 @@ class UrlPolicyEvaluator(
                 effectiveDomain = effectiveDomain,
                 pathWithQuery = pathWithQuery,
                 config = config,
-                isAllowedScopedOAuth = scopedPlatformResult == DefaultBaselineLists.ScopedPlatformResult.ALLOWED_SCOPED_OAUTH
+                isAllowedScopedOAuth = isTrustedIdpOrScopedOAuth
             )
             if (blocklistDecision != null) {
                 return blocklistDecision
@@ -499,7 +499,7 @@ class UrlPolicyEvaluator(
                 DefaultBaselineLists.isCaptchaHost(host, normalizedPath)
 
         // Search engine / proxy check
-        if (config.blockSearchEngines && !isExplicitlyAllowedOverride) {
+        if (config.blockSearchEngines && !isExplicitlyAllowedOverride && !isTrustedIdpOrScopedOAuth) {
             if (DefaultBaselineLists.isSearchEngineOrProxy(host, normalizedPath, config.searchEngineDomains)) {
                 return PolicyDecision.Block(BlockReason.SEARCH_ENGINE_OR_PROXY, canonicalUrl, host)
             }
@@ -513,7 +513,7 @@ class UrlPolicyEvaluator(
                 effectiveDomain = effectiveDomain,
                 pathWithQuery = pathWithQuery,
                 config = config,
-                isAllowedScopedOAuth = scopedPlatformResult == DefaultBaselineLists.ScopedPlatformResult.ALLOWED_SCOPED_OAUTH
+                isAllowedScopedOAuth = isTrustedIdpOrScopedOAuth
             )
             if (blocklistDecision != null) {
                 return blocklistDecision
