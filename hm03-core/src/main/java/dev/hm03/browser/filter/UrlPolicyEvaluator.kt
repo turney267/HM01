@@ -169,10 +169,12 @@ class UrlPolicyEvaluator(
     /**
      * Evaluates a main-frame navigation request (`Intent` launch or `shouldOverrideUrlLoading`).
      */
+    @JvmOverloads
     fun evaluateMainFrameNavigation(
         rawUrl: String,
         isInitialLaunch: Boolean = false,
-        isServerRedirect: Boolean = false
+        isServerRedirect: Boolean = false,
+        isPostOrNonGet: Boolean = false
     ): PolicyDecision {
         val config = configProvider()
         val trimmedUrl = rawUrl.trim()
@@ -191,14 +193,33 @@ class UrlPolicyEvaluator(
         if (scheme != "https") {
             if (scheme == "http") {
                 val parsedHttp = CanonicalUrl.parseHttpOrHttps(trimmedUrl)
-                if (isInitialLaunch && config.upgradeInitialHttpToHttps && parsedHttp != null && !parsedHttp.isIpLiteral) {
-                    val upgradedCandidate = "https://" + parsedHttp.canonicalUrlString.substringAfter("://")
-                    return PolicyDecision.UpgradeToHttps(upgradedCandidate)
+                if (parsedHttp != null) {
+                    // Allow RFC 8252 Section 7.3 loopback OAuth callbacks (http://127.0.0.1:<port> & http://localhost:<port>)
+                    if (isLoopbackHost(parsedHttp.host)) {
+                        return PolicyDecision.Allow(
+                            url = parsedHttp.canonicalUrlString,
+                            host = parsedHttp.host,
+                            effectiveDomain = parsedHttp.host,
+                            isTrustedIdpOrScopedOAuth = true
+                        )
+                    }
+                    // Upgrade both initial and mid-session/redirect http:// navigations to https://
+                    if (config.upgradeInitialHttpToHttps && !parsedHttp.isIpLiteral) {
+                        val upgradedCandidate = "https://" + parsedHttp.canonicalUrlString.substringAfter("://")
+                        return PolicyDecision.UpgradeToHttps(upgradedCandidate)
+                    }
                 }
                 return PolicyDecision.Block(
                     reason = BlockReason.INSECURE_OR_INVALID_SCHEME,
                     url = trimmedUrl,
                     host = parsedHttp?.host.orEmpty()
+                )
+            }
+
+            if (scheme == "intent" && config.allowUnregisteredCustomSchemes) {
+                return PolicyDecision.HandOffToNativeApp(
+                    url = trimmedUrl,
+                    scheme = "intent"
                 )
             }
 
@@ -236,11 +257,16 @@ class UrlPolicyEvaluator(
             return PolicyDecision.Block(BlockReason.MEDIA_STREAM_BLOCKED, canonicalUrl, host)
         }
 
-        if (!isInitialLaunch && nativeAppHandlerDetector?.invoke(canonicalUrl) == true) {
+        val effectiveDomain = DomainExtractor.extractEffectiveDomain(host)
+        val currentLandingDomain = synchronized(stateLock) { landingEffectiveDomain }
+        if (!isInitialLaunch &&
+            !isPostOrNonGet &&
+            (currentLandingDomain == null || effectiveDomain != currentLandingDomain) &&
+            nativeAppHandlerDetector?.invoke(canonicalUrl) == true
+        ) {
             return PolicyDecision.HandOffToNativeApp(url = canonicalUrl, scheme = "https")
         }
 
-        val effectiveDomain = DomainExtractor.extractEffectiveDomain(host)
         val isExplicitlyAllowedOverride = isDomainInSet(host, effectiveDomain, config.allowedDomainsOverride)
 
         // =========================================================================
@@ -388,7 +414,8 @@ class UrlPolicyEvaluator(
             val navDecision = evaluateMainFrameNavigation(
                 rawUrl = rawUrl,
                 isInitialLaunch = false,
-                isServerRedirect = isServerRedirect
+                isServerRedirect = isServerRedirect,
+                isPostOrNonGet = true
             )
             if (navDecision !is PolicyDecision.Allow) {
                 return navDecision
@@ -406,6 +433,20 @@ class UrlPolicyEvaluator(
         val parsed = CanonicalUrl.parseHttpOrHttps(rawUrl)
             ?: return PolicyDecision.Block(BlockReason.INSECURE_OR_INVALID_SCHEME, rawUrl, "")
         if (parsed.scheme != "https") {
+            if (parsed.scheme == "http") {
+                if (isLoopbackHost(parsed.host)) {
+                    return PolicyDecision.Allow(
+                        url = parsed.canonicalUrlString,
+                        host = parsed.host,
+                        effectiveDomain = parsed.host,
+                        isTrustedIdpOrScopedOAuth = true
+                    )
+                }
+                if (config.upgradeInitialHttpToHttps && !parsed.isIpLiteral) {
+                    val upgradedCandidate = "https://" + parsed.canonicalUrlString.substringAfter("://")
+                    return PolicyDecision.UpgradeToHttps(upgradedCandidate)
+                }
+            }
             return PolicyDecision.Block(BlockReason.INSECURE_OR_INVALID_SCHEME, rawUrl, parsed.host)
         }
         if (parsed.isIpLiteral || DomainExtractor.isIpLiteral(parsed.host)) {
@@ -444,6 +485,17 @@ class UrlPolicyEvaluator(
 
         val scheme = CanonicalUrl.extractScheme(trimmedUrl)
         if (scheme != "https") {
+            if (scheme == "http") {
+                val parsedHttp = CanonicalUrl.parseHttpOrHttps(trimmedUrl)
+                if (parsedHttp != null && isLoopbackHost(parsedHttp.host)) {
+                    return PolicyDecision.Allow(
+                        url = parsedHttp.canonicalUrlString,
+                        host = parsedHttp.host,
+                        effectiveDomain = parsedHttp.host,
+                        isTrustedIdpOrScopedOAuth = true
+                    )
+                }
+            }
             return PolicyDecision.Block(
                 reason = BlockReason.INSECURE_OR_INVALID_SCHEME,
                 url = trimmedUrl,
@@ -630,6 +682,11 @@ class UrlPolicyEvaluator(
                     host.endsWith(".$entry")
                 )
         }
+    }
+
+    private fun isLoopbackHost(host: String): Boolean {
+        val normalized = DomainExtractor.normalizeHost(host)
+        return normalized == "localhost" || normalized == "127.0.0.1"
     }
 
     private fun isAllowedCustomCallbackScheme(scheme: String, config: BrowserPolicyConfig): Boolean {

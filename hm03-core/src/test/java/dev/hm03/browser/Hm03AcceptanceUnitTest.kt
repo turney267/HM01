@@ -414,6 +414,37 @@ class Hm03AcceptanceUnitTest {
             (callbackDecision as PolicyDecision.HandOffToNativeApp).targetPackage
         )
 
+        // 5b. Mid-session http:// redirect after OTP automatically upgrades to https:// instead of blocking
+        val midSessionHttpRedirect = evaluator.evaluateMainFrameNavigation(
+            rawUrl = "http://github.com/login/oauth/authorize?code=123",
+            isInitialLaunch = false,
+            isServerRedirect = true
+        )
+        assertTrue(midSessionHttpRedirect is PolicyDecision.UpgradeToHttps)
+        assertEquals(
+            "https://github.com/login/oauth/authorize?code=123",
+            (midSessionHttpRedirect as PolicyDecision.UpgradeToHttps).httpsUrl
+        )
+
+        val midSessionInterceptHttp = evaluator.evaluateMainFrameInterceptRequest(
+            rawUrl = "http://github.com/sessions/two-factor",
+            method = "GET",
+            isServerRedirect = true
+        )
+        assertTrue(midSessionInterceptHttp is PolicyDecision.UpgradeToHttps)
+
+        // 5c. RFC 8252 Loopback HTTP OAuth callbacks (http://127.0.0.1:<port> & http://localhost:<port>) are allowed
+        val loopback127 = evaluator.evaluateMainFrameNavigation(
+            rawUrl = "http://127.0.0.1:54321/callback?code=gho_123",
+            isInitialLaunch = false
+        )
+        assertTrue(loopback127 is PolicyDecision.Allow)
+        val loopbackLocalhost = evaluator.evaluateMainFrameNavigation(
+            rawUrl = "http://localhost:8080/oauth/callback?code=gho_456",
+            isInitialLaunch = false
+        )
+        assertTrue(loopbackLocalhost is PolicyDecision.Allow)
+
         // 6. User-Agent sanitization strips "; wv" and "Version/4.0"
         val rawWebViewUa =
             "Mozilla/5.0 (Linux; Android 14; Pixel 8 Build/UQ1A.240205.004; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/122.0.6261.64 Mobile Safari/537.36"

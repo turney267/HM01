@@ -289,9 +289,18 @@ data class CanonicalUrl(
             while (i < input.length) {
                 val ch = input[i]
                 if (ch == '%') {
-                    if (i + 2 >= input.length) return null
+                    if (i + 2 >= input.length) {
+                        sb.append('%')
+                        i++
+                        continue
+                    }
                     val hex = input.substring(i + 1, i + 3)
-                    val byteVal = hex.toIntOrNull(16) ?: return null
+                    val byteVal = hex.toIntOrNull(16)
+                    if (byteVal == null) {
+                        sb.append('%')
+                        i++
+                        continue
+                    }
                     if (byteVal == 0) return null
                     // Collect contiguous percent-encoded UTF-8 bytes
                     val bytes = ByteArrayOutputStreamLite()
@@ -299,7 +308,7 @@ data class CanonicalUrl(
                     i += 3
                     while (i + 2 < input.length && input[i] == '%') {
                         val nextHex = input.substring(i + 1, i + 3)
-                        val nextByte = nextHex.toIntOrNull(16) ?: return null
+                        val nextByte = nextHex.toIntOrNull(16) ?: break
                         if (nextByte == 0) return null
                         bytes.write(nextByte)
                         i += 3

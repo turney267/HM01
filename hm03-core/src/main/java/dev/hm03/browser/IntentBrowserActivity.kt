@@ -75,6 +75,7 @@ class IntentBrowserActivity : Activity() {
     }
 
     private var sessionStartElapsedRealtimeMs: Long = 0L
+    private var activeInitialLaunchUrl: String? = null
     private var committedHost: String? = null
     private var isBlockedScreenVisible: Boolean = false
     private var isSessionWiped: Boolean = false
@@ -88,6 +89,7 @@ class IntentBrowserActivity : Activity() {
             finishAndRemoveTask()
             return
         }
+        activeInitialLaunchUrl = initialRawUrl
 
         activeConfig = BrowserPolicyProvider.getConfig(applicationContext)
         if (!activeConfig.persistCookiesAndStorage) {
@@ -120,6 +122,17 @@ class IntentBrowserActivity : Activity() {
             return
         }
 
+        // Preserve active WebView & 2FA/OTP login progress if returning to the same initial launch URL
+        if (!isSessionWiped &&
+            !isBlockedScreenVisible &&
+            webView != null &&
+            rawUrl == activeInitialLaunchUrl
+        ) {
+            scheduleSessionTimeout()
+            return
+        }
+
+        activeInitialLaunchUrl = rawUrl
         setIntent(intent)
         resetSessionAndWebView()
         scheduleSessionTimeout()
@@ -934,6 +947,23 @@ class IntentBrowserActivity : Activity() {
             requireBrowsable: Boolean = true
         ): Intent {
             val resolvedAction = action.trim().takeIf { it.isNotEmpty() } ?: Intent.ACTION_VIEW
+            if (url.startsWith("intent:", ignoreCase = true)) {
+                val parsedIntent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+                parsedIntent.action = resolvedAction
+                parsedIntent.categories?.toList()?.forEach { parsedIntent.removeCategory(it) }
+                if (requireBrowsable) {
+                    parsedIntent.addCategory(Intent.CATEGORY_BROWSABLE)
+                } else {
+                    parsedIntent.addCategory(Intent.CATEGORY_DEFAULT)
+                }
+                parsedIntent.component = null
+                parsedIntent.selector = null
+                if (!targetPackage.isNullOrBlank()) {
+                    parsedIntent.setPackage(targetPackage.trim())
+                }
+                parsedIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                return parsedIntent
+            }
             return Intent(resolvedAction, Uri.parse(url)).apply {
                 if (requireBrowsable) {
                     addCategory(Intent.CATEGORY_BROWSABLE)

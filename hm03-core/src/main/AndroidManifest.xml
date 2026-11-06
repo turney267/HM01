@@ -12,16 +12,18 @@
     </queries>
 
     <application
-        android:usesCleartextTraffic="false">
+        android:usesCleartextTraffic="true">
 
         <!--
             Captive No-URL-Bar Intent & Custom Tabs Browser Activity.
             Intentionally omits CATEGORY_LAUNCHER so no home screen icon is shown.
+            excludeFromRecents="false" ensures users can switch to an Authenticator app or
+            password manager for 2FA/OTP and return via Recents without losing their session.
         -->
         <activity
             android:name="dev.hm03.browser.IntentBrowserActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
-            android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
+            android:excludeFromRecents="false"
             android:exported="true"
             android:launchMode="singleTask"
             android:noHistory="false"
