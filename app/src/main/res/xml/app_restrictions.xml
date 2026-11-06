@@ -16,11 +16,18 @@
         android:title="@string/restriction_custom_doh_url_title" />
 
     <restriction
-        android:defaultValue="false"
+        android:defaultValue="true"
         android:description="@string/restriction_fail_closed_dns_desc"
         android:key="fail_closed_on_dns_error"
         android:restrictionType="bool"
         android:title="@string/restriction_fail_closed_dns_title" />
+
+    <restriction
+        android:defaultValue="true"
+        android:description="@string/restriction_allow_custom_user_doh_desc"
+        android:key="allow_custom_user_doh_url"
+        android:restrictionType="bool"
+        android:title="@string/restriction_allow_custom_user_doh_title" />
 
     <restriction
         android:defaultValue=""
@@ -49,6 +56,27 @@
         android:key="allowed_domains_override"
         android:restrictionType="string"
         android:title="@string/restriction_allowed_domains_override_title" />
+
+    <restriction
+        android:defaultValue="false"
+        android:description="@string/restriction_allow_unregistered_schemes_desc"
+        android:key="allow_unregistered_custom_schemes"
+        android:restrictionType="bool"
+        android:title="@string/restriction_allow_unregistered_schemes_title" />
+
+    <restriction
+        android:defaultValue="false"
+        android:description="@string/restriction_allow_third_party_iframes_desc"
+        android:key="allow_third_party_iframes"
+        android:restrictionType="bool"
+        android:title="@string/restriction_allow_third_party_iframes_title" />
+
+    <restriction
+        android:defaultValue="true"
+        android:description="@string/restriction_strip_webview_ua_desc"
+        android:key="strip_webview_user_agent_token"
+        android:restrictionType="bool"
+        android:title="@string/restriction_strip_webview_ua_title" />
 
     <restriction
         android:defaultValue="1"

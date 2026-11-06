@@ -11,6 +11,9 @@
     <string name="restriction_fail_closed_dns_title">Fail Closed on DNS Error</string>
     <string name="restriction_fail_closed_dns_desc">Block non-IdP domains if the DoH server is unreachable.</string>
 
+    <string name="restriction_allow_custom_user_doh_title">Allow Custom User DoH URL</string>
+    <string name="restriction_allow_custom_user_doh_desc">Allow custom HTTPS DoH URLs outside the preset userDnsOptions list.</string>
+
     <string name="restriction_blocked_domains_title">Blocked Domains</string>
     <string name="restriction_blocked_domains_desc">Comma-separated list of domains to block (e.g. reddit.com, substack.com).</string>
 
@@ -18,10 +21,19 @@
     <string name="restriction_blocked_keywords_desc">Comma-separated list of hostname keywords to block.</string>
 
     <string name="restriction_blocked_path_regexes_title">Blocked Path Regexes</string>
-    <string name="restriction_blocked_path_regexes_desc">Comma-separated list of URL path regex patterns to block (e.g. /reels, /shorts).</string>
+    <string name="restriction_blocked_path_regexes_desc">Comma- or newline-separated list of URL path regex patterns to block (e.g. ^/reels, ^/shorts).</string>
 
     <string name="restriction_allowed_domains_override_title">Allowed Domains Override</string>
     <string name="restriction_allowed_domains_override_desc">Comma-separated list of domains explicitly permitted.</string>
+
+    <string name="restriction_allow_unregistered_schemes_title">Allow Unregistered Custom Callback Schemes</string>
+    <string name="restriction_allow_unregistered_schemes_desc">Permit custom URI schemes not explicitly listed in customCallbackSchemes.</string>
+
+    <string name="restriction_allow_third_party_iframes_title">Allow Third-Party Embedded Iframes</string>
+    <string name="restriction_allow_third_party_iframes_desc">Permit cross-domain iframes beyond the active domain and trusted IdP/Payment/Captcha hosts.</string>
+
+    <string name="restriction_strip_webview_ua_title">Sanitize WebView User-Agent Token</string>
+    <string name="restriction_strip_webview_ua_desc">Strip ;wv and Version/X.Y tokens for Custom Tabs OAuth compatibility.</string>
 
     <string name="restriction_max_external_hops_title">Max External Domain Hops (Link Leash)</string>
     <string name="restriction_max_external_hops_desc">Maximum number of external domain hops permitted from the landing domain (-1 to disable).</string>

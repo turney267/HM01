@@ -10,6 +10,7 @@ import dev.hm01.browser.dns.DohDecisionCache
 import dev.hm01.browser.dns.DohResolver
 import dev.hm01.browser.dns.DohVerdict
 import dev.hm01.browser.filter.BlockReason
+import dev.hm01.browser.filter.CanonicalUrl
 import dev.hm01.browser.filter.DomainExtractor
 import dev.hm01.browser.filter.MediaStreamBlocker
 import dev.hm01.browser.filter.PolicyDecision
@@ -30,7 +31,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Comprehensive unit tests verifying all 7 acceptance test scenarios in `HM01_Spec.md`.
+ * Comprehensive unit tests verifying all 7 acceptance test scenarios in `HM01_Spec.md`
+ * plus security regression tests for findings `HM01-01` through `HM01-15`.
  */
 class Hm01AcceptanceUnitTest {
 
@@ -325,6 +327,9 @@ class Hm01AcceptanceUnitTest {
         assertEquals("github.com", defaultConfig.pathScopedPlatformRules.first().domain)
         assertEquals(setOf(".mp4"), defaultConfig.blockedMediaExtensions)
         assertTrue(defaultConfig.blockedDomains.isEmpty())
+        assertTrue(defaultConfig.failClosedOnDnsError)
+        assertFalse(defaultConfig.allowUnregisteredCustomSchemes)
+        assertFalse(defaultConfig.allowThirdPartyIframes)
 
         val evaluator = UrlPolicyEvaluator(
             configProvider = {
@@ -570,6 +575,305 @@ class Hm01AcceptanceUnitTest {
     }
 
     // =========================================================================
+    // Security Regression Suite (HM01-01 through HM01-15)
+    // =========================================================================
+
+    @Test
+    fun securityRegression_hm01_01_urlParserDifferentialAndIdnCanonicalization() {
+        val config = BrowserPolicyConfig(
+            blockedDomains = setOf("reddit.com", "evil.example")
+        )
+        val evaluator = UrlPolicyEvaluator(
+            configProvider = { config },
+            dohResolver = createAllowAllDohResolver()
+        )
+
+        // 1. Userinfo (@) authority confusion with WHATWG fallback triggers must be strictly rejected
+        val userinfoAttacks = listOf(
+            "https://accounts.google.com:443@evil.example/?q=|",
+            "https://kmart.com.au:443@reddit.com/r/all?x={1}",
+            "https://github.com@evil.example/login",
+            "https://user%40evil.example@kmart.com.au/",
+            "https://kmart.com.au\\@evil.example/path",
+            "https://kmart.com.au\\evil.example/path"
+        )
+        for (attackUrl in userinfoAttacks) {
+            val decision = evaluator.evaluateMainFrameNavigation(attackUrl, isInitialLaunch = true)
+            assertTrue("Expected $attackUrl to be blocked", decision is PolicyDecision.Block)
+            assertEquals(
+                BlockReason.INSECURE_OR_INVALID_SCHEME,
+                (decision as PolicyDecision.Block).reason
+            )
+        }
+
+        // 2. Fullwidth dot separator (\u3002, \uFF0E, \uFF61) must normalize to '.' and match blocklists
+        val fullwidthReddit = evaluator.evaluateMainFrameNavigation(
+            "https://www\u3002reddit\uFF0Ecom/r/android",
+            isInitialLaunch = true
+        )
+        assertTrue(fullwidthReddit is PolicyDecision.Block)
+        assertEquals(BlockReason.HOST_BLOCKLIST_DOMAIN, (fullwidthReddit as PolicyDecision.Block).reason)
+
+        // 3. Unicode IDN converts to ASCII Punycode in canonical URL
+        val idnParsed = CanonicalUrl.parseHttpOrHttps("https://münchen.de/rathaus")
+        assertNotNull(idnParsed)
+        assertEquals("xn--mnchen-3ya.de", idnParsed!!.host)
+        assertEquals("https://xn--mnchen-3ya.de/rathaus", idnParsed.canonicalUrlString)
+
+        // 4. Legitimate URLs containing WHATWG query characters ('|', '{', '}') still work cleanly
+        val validPipeQuery = evaluator.evaluateMainFrameNavigation(
+            "https://www.kmart.com.au/search?facets=color|blue",
+            isInitialLaunch = true
+        )
+        assertTrue(validPipeQuery is PolicyDecision.Allow)
+    }
+
+    @Test
+    fun securityRegression_hm01_02_mainFrameHttpPostInterception() {
+        val config = BrowserPolicyConfig(
+            blockedDomains = setOf("reddit.com"),
+            maxExternalDomainHops = 1
+        )
+        val evaluator = UrlPolicyEvaluator(
+            configProvider = { config },
+            dohResolver = createAllowAllDohResolver()
+        )
+
+        // Establish initial landing domain (kmart.com.au)
+        assertTrue(
+            evaluator.evaluateMainFrameNavigation(
+                "https://www.kmart.com.au/login",
+                isInitialLaunch = true
+            ) is PolicyDecision.Allow
+        )
+        evaluator.markRedirectGraceComplete()
+
+        // 1. Same-domain POST form submission is allowed
+        val sameDomainPost = evaluator.evaluateMainFrameInterceptRequest(
+            rawUrl = "https://www.kmart.com.au/auth/submit",
+            method = "POST"
+        )
+        assertTrue(sameDomainPost is PolicyDecision.Allow)
+
+        // 2. POST navigation to a blocked domain is blocked
+        val blockedDomainPost = evaluator.evaluateMainFrameInterceptRequest(
+            rawUrl = "https://www.reddit.com/login",
+            method = "POST"
+        )
+        assertTrue(blockedDomainPost is PolicyDecision.Block)
+        assertEquals(BlockReason.HOST_BLOCKLIST_DOMAIN, (blockedDomainPost as PolicyDecision.Block).reason)
+
+        // 3. POST navigation to 1st external domain counts as hop #1, and 2nd external POST is blocked by Link Leash
+        val hop1Post = evaluator.evaluateMainFrameInterceptRequest(
+            rawUrl = "https://www.breville.com.au/register",
+            method = "POST"
+        )
+        assertTrue(hop1Post is PolicyDecision.Allow)
+        assertEquals(1, evaluator.externalDomainHops)
+
+        val hop2Post = evaluator.evaluateMainFrameInterceptRequest(
+            rawUrl = "https://www.other-external-site.org/form",
+            method = "POST"
+        )
+        assertTrue(hop2Post is PolicyDecision.Block)
+        assertEquals(
+            BlockReason.LINK_LEASH_HOP_LIMIT_EXCEEDED,
+            (hop2Post as PolicyDecision.Block).reason
+        )
+    }
+
+    @Test
+    fun securityRegression_hm01_03_customSchemeDefaultDenyAndPackagePinning() {
+        val config = BrowserPolicyConfig(
+            customCallbackSchemes = mapOf(
+                "juubunparent" to CustomSchemeTarget(
+                    scheme = "juubunparent",
+                    targetPackage = "com.juubun.app",
+                    action = "android.intent.action.VIEW"
+                )
+            ),
+            allowUnregisteredCustomSchemes = false
+        )
+        val evaluator = UrlPolicyEvaluator(
+            configProvider = { config },
+            dohResolver = createAllowAllDohResolver()
+        )
+
+        // 1. Registered custom callback scheme is allowed and carries targetPackage
+        val registered = evaluator.evaluateMainFrameNavigation("juubunparent://oauth?code=secret")
+        assertTrue(registered is PolicyDecision.HandOffToNativeApp)
+        assertEquals("com.juubun.app", (registered as PolicyDecision.HandOffToNativeApp).targetPackage)
+
+        // 2. Unregistered custom schemes and secondary browser schemes are blocked by default (Option 1A)
+        for (unregisteredUrl in listOf(
+            "googlechrome://navigate?url=https://reddit.com",
+            "firefox://open-url?url=https://reddit.com",
+            "vnd.youtube://watch?v=123",
+            "unregisteredapp://oauth?code=123",
+            "smsto:123456",
+            "geo:0,0?q=test"
+        )) {
+            val decision = evaluator.evaluateMainFrameNavigation(unregisteredUrl)
+            assertTrue("Expected $unregisteredUrl to be blocked", decision is PolicyDecision.Block)
+            assertEquals(
+                BlockReason.INSECURE_OR_INVALID_SCHEME,
+                (decision as PolicyDecision.Block).reason
+            )
+        }
+    }
+
+    @Test
+    fun securityRegression_hm01_04_subFrameIframeIsolationAndPathRules() {
+        val config = BrowserPolicyConfig(
+            allowThirdPartyIframes = false
+        )
+        val evaluator = UrlPolicyEvaluator(
+            configProvider = { config },
+            dohResolver = createAllowAllDohResolver()
+        )
+
+        assertTrue(
+            evaluator.evaluateMainFrameNavigation(
+                "https://www.kmart.com.au/checkout",
+                isInitialLaunch = true
+            ) is PolicyDecision.Allow
+        )
+        evaluator.markRedirectGraceComplete()
+
+        // 1. Same-domain iframe is allowed
+        val sameDomainIframe = evaluator.evaluateSubResourceRequest(
+            rawUrl = "https://pay.kmart.com.au/widget",
+            requestHeaders = mapOf("Sec-Fetch-Dest" to "iframe")
+        )
+        assertTrue(sameDomainIframe is PolicyDecision.Allow)
+
+        // 2. Trusted IdP / Payment / Captcha iframes (Stripe, Cloudflare Turnstile) are allowed
+        val stripeIframe = evaluator.evaluateSubResourceRequest(
+            rawUrl = "https://js.stripe.com/v3/elements-inner-card.html",
+            requestHeaders = mapOf("Sec-Fetch-Dest" to "iframe")
+        )
+        assertTrue(stripeIframe is PolicyDecision.Allow)
+
+        val captchaIframe = evaluator.evaluateSubResourceRequest(
+            rawUrl = "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile",
+            isSubFrameNavigation = true
+        )
+        assertTrue(captchaIframe is PolicyDecision.Allow)
+
+        // 3. Restricted path-scoped platform in an iframe is blocked with NON_OAUTH_PLATFORM_PATH
+        val githubRepoIframe = evaluator.evaluateSubResourceRequest(
+            rawUrl = "https://github.com/trending",
+            isSubFrameNavigation = true
+        )
+        assertTrue(githubRepoIframe is PolicyDecision.Block)
+        assertEquals(
+            BlockReason.NON_OAUTH_PLATFORM_PATH,
+            (githubRepoIframe as PolicyDecision.Block).reason
+        )
+
+        // 4. Arbitrary third-party surfing iframe is blocked with THIRD_PARTY_IFRAME_BLOCKED (Option 4A)
+        val thirdPartyIframe = evaluator.evaluateSubResourceRequest(
+            rawUrl = "https://untrusted-portal.org/surf",
+            requestHeaders = mapOf("Sec-Fetch-Dest" to "iframe")
+        )
+        assertTrue(thirdPartyIframe is PolicyDecision.Block)
+        assertEquals(
+            BlockReason.THIRD_PARTY_IFRAME_BLOCKED,
+            (thirdPartyIframe as PolicyDecision.Block).reason
+        )
+    }
+
+    @Test
+    fun securityRegression_hm01_07_09_dohPrivateIpBlockingBareCnameTtlAndEdnsPadding() {
+        // 1. Private RFC 1918, Link-Local, CGNAT, and Multicast IPs are rejected as sinkhole/non-public
+        assertTrue(DohResolver.isSinkholeOrBlockIp(10, 0, 0, 1))
+        assertTrue(DohResolver.isSinkholeOrBlockIp(172, 16, 0, 1))
+        assertTrue(DohResolver.isSinkholeOrBlockIp(172, 31, 255, 255))
+        assertTrue(DohResolver.isSinkholeOrBlockIp(192, 168, 1, 1))
+        assertTrue(DohResolver.isSinkholeOrBlockIp(169, 254, 169, 254))
+        assertTrue(DohResolver.isSinkholeOrBlockIp(100, 64, 0, 1))
+        assertTrue(DohResolver.isSinkholeOrBlockIp(0, 1, 2, 3))
+        assertTrue(DohResolver.isSinkholeOrBlockIp(224, 0, 0, 1))
+        assertFalse(DohResolver.isSinkholeOrBlockIp(93, 184, 216, 34))
+
+        val privateIpPacket = buildMockDnsAResponse("rebind.example", rcode = 0, ip = intArrayOf(192, 168, 1, 1))
+        assertEquals(DohVerdict.BLOCK, DohResolver.parseDnsResponseVerdict(privateIpPacket))
+
+        // 2. Bare CNAME response with zero resolved A/AAAA records is blocked
+        val bareCnamePacket = buildMockDnsCnameOnlyResponse("alias.example", "target.example")
+        assertEquals(DohVerdict.BLOCK, DohResolver.parseDnsResponseVerdict(bareCnamePacket))
+
+        // 3. EDNS(0) padding pads query packets to a multiple of 128 bytes
+        val rawQuery = DohResolver.buildDnsAQueryPacket("kmart.com.au")
+        val paddedQuery = DohResolver.padDnsQueryPacketWithEdns0(rawQuery, blockSize = 128)
+        assertEquals(0, paddedQuery.size % 128)
+        assertEquals("kmart.com.au", extractQueryName(paddedQuery))
+
+        // 4. DoH endpoint validation rejects cleartext http:// and IP literals
+        assertTrue(BrowserPolicyConfig.isValidDohEndpointUrl("https://family.cloudflare-dns.com/dns-query"))
+        assertFalse(BrowserPolicyConfig.isValidDohEndpointUrl("http://family.cloudflare-dns.com/dns-query"))
+        assertFalse(BrowserPolicyConfig.isValidDohEndpointUrl("https://1.1.1.1/dns-query"))
+        assertFalse(BrowserPolicyConfig.isValidDohEndpointUrl("https://localhost/dns-query"))
+    }
+
+    @Test
+    fun securityRegression_hm01_08_11_12_pathNormalizationRegexQuantifiersAndExpandedPsl() {
+        val config = BrowserPolicyConfig(
+            blockedPathRegexes = BrowserPolicyProvider.splitConfigListPreservingQuantifiers(
+                "^/(reels?|shorts|stories)(/|$), ^/api/v[0-9]{1,2}/feed"
+            ),
+            blockedMediaExtensions = setOf(".mp4"),
+            blockedMediaMimePrefixes = setOf("video/", "audio/")
+        )
+        val evaluator = UrlPolicyEvaluator(
+            configProvider = { config },
+            dohResolver = createAllowAllDohResolver()
+        )
+
+        // 1. Path traversal /login/../trending on path-scoped github.com is normalized to /trending and blocked
+        val traversalAttack = evaluator.evaluateMainFrameNavigation(
+            "https://github.com/login/../trending",
+            isInitialLaunch = true
+        )
+        assertTrue(traversalAttack is PolicyDecision.Block)
+        assertEquals(BlockReason.NON_OAUTH_PLATFORM_PATH, (traversalAttack as PolicyDecision.Block).reason)
+
+        // 2. Percent-encoded (%72eels), double-encoded (%2572eels), and double-slash (//reels) paths match blockedPathRegexes
+        for (evasionUrl in listOf(
+            "https://www.kmart.com.au/%72eels/123",
+            "https://www.kmart.com.au/%2572eels/123",
+            "https://www.kmart.com.au//shorts/123",
+            "https://www.kmart.com.au/api/v12/feed"
+        )) {
+            val decision = evaluator.evaluateMainFrameNavigation(evasionUrl, isInitialLaunch = true)
+            assertTrue("Expected $evasionUrl to be blocked", decision is PolicyDecision.Block)
+            assertEquals(BlockReason.HOST_BLOCKLIST_PATH, (decision as PolicyDecision.Block).reason)
+        }
+
+        // 3. Matrix parameter & percent-encoded .mp4 extension and composite Accept header are blocked by MediaStreamBlocker
+        assertTrue(
+            MediaStreamBlocker.shouldBlockMediaRequest(
+                url = "https://cdn.example.com/clip.%6dp4;jsessionid=123",
+                config = config
+            )
+        )
+        assertTrue(
+            MediaStreamBlocker.shouldBlockMediaRequest(
+                url = "https://cdn.example.com/stream",
+                requestHeaders = mapOf("Accept" to "image/webp, video/mp4;q=0.9"),
+                config = config
+            )
+        )
+
+        // 4. Expanded PSL multi-tenant cloud domains and ccSLDs isolate properly
+        assertEquals("blog-a.wordpress.com", DomainExtractor.extractEffectiveDomain("blog-a.wordpress.com"))
+        assertEquals("blog-b.wordpress.com", DomainExtractor.extractEffectiveDomain("blog-b.wordpress.com"))
+        assertEquals("d111.cloudfront.net", DomainExtractor.extractEffectiveDomain("d111.cloudfront.net"))
+        assertEquals("shop.com.vn", DomainExtractor.extractEffectiveDomain("www.shop.com.vn"))
+        assertEquals("school.k12.ca.us", DomainExtractor.extractEffectiveDomain("portal.school.k12.ca.us"))
+    }
+
+    // =========================================================================
     // Test Helpers
     // =========================================================================
 
@@ -624,6 +928,35 @@ class Hm01AcceptanceUnitTest {
                 out.writeByte(octet)
             }
         }
+        out.flush()
+        return baos.toByteArray()
+    }
+
+    private fun buildMockDnsCnameOnlyResponse(qname: String, cnameTarget: String): ByteArray {
+        val baos = ByteArrayOutputStream()
+        val out = DataOutputStream(baos)
+
+        out.writeShort(0x0000)
+        out.writeShort(0x8180) // NOERROR
+        out.writeShort(1) // QDCOUNT = 1
+        out.writeShort(1) // ANCOUNT = 1 (CNAME only, no A/AAAA)
+        out.writeShort(0) // NSCOUNT = 0
+        out.writeShort(0) // ARCOUNT = 0
+
+        writeDnsName(out, qname)
+        out.writeShort(1) // QTYPE = A
+        out.writeShort(1) // QCLASS = IN
+
+        out.writeShort(0xC00C) // Pointer to QNAME
+        out.writeShort(5) // TYPE = CNAME
+        out.writeShort(1) // CLASS = IN
+        out.writeInt(300) // TTL = 300s
+
+        val rdataBytes = ByteArrayOutputStream()
+        writeDnsName(DataOutputStream(rdataBytes), cnameTarget)
+        val rdata = rdataBytes.toByteArray()
+        out.writeShort(rdata.size)
+        out.write(rdata)
         out.flush()
         return baos.toByteArray()
     }

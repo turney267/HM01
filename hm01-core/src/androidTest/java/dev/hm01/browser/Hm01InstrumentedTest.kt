@@ -6,9 +6,7 @@ import android.os.Bundle
 import android.webkit.CookieManager
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import dev.hm01.browser.config.BrowserPolicyConfig
 import dev.hm01.browser.config.BrowserPolicyProvider
-import dev.hm01.browser.config.DohPreset
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -32,10 +30,11 @@ class Hm01InstrumentedTest {
     fun managedRestrictionsBundleParsesCorrectly() {
         val bundle = Bundle().apply {
             putString("brand_title", "Juubun Safe Link")
-            putString("doh_preset", "CLEANBROWSING_FAMILY")
+            putString("custom_doh_url", "https://family.cloudflare-dns.com/dns-query")
+            putBoolean("fail_closed_on_dns_error", true)
             putString("blocked_domains", "substack.com, reddit.com, news.ycombinator.com")
             putString("blocked_keywords", "gossip, tabloid")
-            putString("blocked_path_regexes", "^/reels, ^/shorts")
+            putString("blocked_path_regexes", "^/reels, ^/shorts, ^/api/v[0-9]{1,2}/feed")
             putInt("max_external_domain_hops", 1)
             putInt("session_timeout_seconds", 300)
             putBoolean("block_video_audio", true)
@@ -43,10 +42,12 @@ class Hm01InstrumentedTest {
 
         val parsed = BrowserPolicyProvider.parseRestrictionsBundle(bundle)
         assertEquals("Juubun Safe Link", parsed.brandTitle)
-        assertEquals(DohPreset.CLEANBROWSING_FAMILY, parsed.dohPreset)
+        assertEquals("https://family.cloudflare-dns.com/dns-query", parsed.customDohUrl)
+        assertTrue(parsed.failClosedOnDnsError)
         assertTrue(parsed.blockedDomains.contains("substack.com"))
         assertTrue(parsed.blockedDomains.contains("reddit.com"))
         assertTrue(parsed.blockedDomains.contains("news.ycombinator.com"))
+        assertEquals(3, parsed.compiledBlockedPathRegexes.size)
         assertEquals(1, parsed.maxExternalDomainHops)
         assertEquals(300_000L, parsed.sessionTimeoutMs)
         assertTrue(parsed.blockVideoAndAudio)

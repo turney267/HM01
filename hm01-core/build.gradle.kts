@@ -4,7 +4,7 @@ plugins {
     id("maven-publish")
 }
 
-group = "com.github.juubun"
+group = "com.github.turney267"
 version = "1.0.0"
 
 android {
@@ -49,6 +49,8 @@ android {
 
 dependencies {
     api("androidx.browser:browser:1.8.0")
+    implementation("androidx.webkit:webkit:1.12.1")
+    implementation("androidx.core:core-ktx:1.13.1")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.5.2")
@@ -60,7 +62,7 @@ afterEvaluate {
     publishing {
         publications {
             register<MavenPublication>("release") {
-                groupId = "com.github.juubun"
+                groupId = "com.github.turney267"
                 artifactId = "hm01-core"
                 version = "1.0.0"
                 from(components["release"])

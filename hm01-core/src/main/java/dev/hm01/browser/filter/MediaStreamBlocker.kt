@@ -2,7 +2,6 @@ package dev.hm01.browser.filter
 
 import dev.hm01.browser.config.BrowserPolicyConfig
 import dev.hm01.browser.config.DefaultBaselineLists
-import java.net.URI
 import java.util.Locale
 
 /**
@@ -33,11 +32,11 @@ object MediaStreamBlocker {
     ): Boolean {
         if (!config.blockVideoAndAudio) return false
 
-        val parsed = runCatching { URI(url) }.getOrNull()
-        val host = parsed?.host ?: extractFallbackHost(url)
-        val path = (parsed?.rawPath ?: extractFallbackPath(url)).lowercase(Locale.ROOT)
+        val parsed = CanonicalUrl.parseHttpOrHttps(url) ?: return true
+        val host = parsed.host
+        val path = parsed.normalizedPath.lowercase(Locale.ROOT)
 
-        // 1. Check media file extensions on the URL path configured in BrowserPolicyConfig
+        // 1. Check media file extensions on the normalized URL path configured in BrowserPolicyConfig
         if (hasBlockedMediaExtension(path, config.blockedMediaExtensions)) {
             return true
         }
@@ -64,15 +63,20 @@ object MediaStreamBlocker {
             }
         }
 
-        // 3. Check Accept header against configured blockedMediaMimePrefixes (e.g. "video/", "audio/")
+        // 3. Check Accept header media ranges against configured blockedMediaMimePrefixes (e.g. "video/", "audio/")
         if (acceptHeader != null && config.blockedMediaMimePrefixes.isNotEmpty()) {
-            val isDocumentOrImageAccept = acceptHeader.startsWith("text/html") ||
-                acceptHeader.startsWith("image/")
-            if (!isDocumentOrImageAccept &&
+            val mediaRanges = acceptHeader
+                .split(',')
+                .map { it.substringBefore(';').trim() }
+                .filter { it.isNotEmpty() }
+
+            val hasBlockedMimeRange = mediaRanges.any { mediaType ->
                 config.blockedMediaMimePrefixes.any { prefix ->
-                    acceptHeader.contains(prefix.lowercase(Locale.ROOT))
+                    val cleanPrefix = prefix.trim().lowercase(Locale.ROOT)
+                    cleanPrefix.isNotEmpty() && mediaType.startsWith(cleanPrefix)
                 }
-            ) {
+            }
+            if (hasBlockedMimeRange) {
                 return true
             }
         }
@@ -91,7 +95,8 @@ object MediaStreamBlocker {
     }
 
     /**
-     * Checks whether [rawPath] ends with any blocked file extension in [extensions].
+     * Checks whether [rawPath] ends with any blocked file extension in [extensions]
+     * after canonicalizing percent-encoding, dot-segments, and matrix parameters.
      */
     @JvmStatic
     @JvmOverloads
@@ -100,22 +105,28 @@ object MediaStreamBlocker {
         extensions: Set<String> = DEFAULT_EXAMPLE_MEDIA_EXTENSIONS
     ): Boolean {
         if (extensions.isEmpty()) return false
-        val cleanPath = rawPath
+        val pathOnly = rawPath
             .substringBefore('?')
             .substringBefore('#')
             .trim()
+        if (pathOnly.isEmpty()) return false
+
+        val normalized = (CanonicalUrl.normalizePathForPolicy(pathOnly) ?: return true)
+            .trimEnd('/')
             .lowercase(Locale.ROOT)
-        if (cleanPath.isEmpty()) return false
+        if (normalized.isEmpty()) return false
+
         return extensions.any { rawExt ->
             val ext = rawExt.trim().lowercase(Locale.ROOT).let {
                 if (it.startsWith(".")) it else ".$it"
             }
-            ext.length > 1 && cleanPath.endsWith(ext)
+            ext.length > 1 && normalized.endsWith(ext)
         }
     }
 
     /**
-     * Builds the DOM/JavaScript lockdown script injected on `onPageStarted`, `onPageCommitVisible`,
+     * Builds the DOM/JavaScript lockdown script injected at document start (across all frames via
+     * `WebViewCompat.addDocumentStartJavaScript`) and on `onPageStarted`, `onPageCommitVisible`,
      * and `onPageFinished`.
      */
     @JvmStatic
@@ -160,7 +171,7 @@ object MediaStreamBlocker {
                         }
                     }
                     var styleId = '__hm01_media_lockdown_style__';
-                    if (!document.getElementById(styleId)) {
+                    if (typeof document !== 'undefined' && !document.getElementById(styleId)) {
                         var style = document.createElement('style');
                         style.id = styleId;
                         style.type = 'text/css';
@@ -170,7 +181,7 @@ object MediaStreamBlocker {
                             target.appendChild(style);
                         }
                     }
-                    if (${config.blockVideoAndAudio} && document.querySelectorAll) {
+                    if (${config.blockVideoAndAudio} && typeof document !== 'undefined' && document.querySelectorAll) {
                         var mediaNodes = document.querySelectorAll('video, audio');
                         for (var i = 0; i < mediaNodes.length; i++) {
                             try {
@@ -183,17 +194,5 @@ object MediaStreamBlocker {
                 } catch (err) {}
             })();
         """.trimIndent()
-    }
-
-    private fun extractFallbackHost(url: String): String {
-        val afterScheme = url.substringAfter("://", "")
-        return afterScheme.substringBefore('/').substringBefore(':').substringBefore('?')
-    }
-
-    private fun extractFallbackPath(url: String): String {
-        val afterScheme = url.substringAfter("://", "")
-        val slashIndex = afterScheme.indexOf('/')
-        if (slashIndex < 0) return "/"
-        return afterScheme.substring(slashIndex).substringBefore('?').substringBefore('#')
     }
 }

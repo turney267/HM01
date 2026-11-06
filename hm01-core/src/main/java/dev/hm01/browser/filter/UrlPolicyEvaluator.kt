@@ -5,7 +5,6 @@ import dev.hm01.browser.config.DefaultBaselineLists
 import dev.hm01.browser.config.DnsMode
 import dev.hm01.browser.dns.DohResolver
 import dev.hm01.browser.dns.DohVerdict
-import java.net.URI
 import java.util.Locale
 
 /**
@@ -43,6 +42,10 @@ enum class BlockReason(val title: String, val userMessage: String) {
     HOST_BLOCKLIST_PATH(
         "Blocked Page Section",
         "This section or feed is restricted by your active focus policy."
+    ),
+    THIRD_PARTY_IFRAME_BLOCKED(
+        "Embedded Frame Blocked",
+        "Third-party embedded frames are restricted by your active focus policy."
     ),
     MAX_TOTAL_HOPS_EXCEEDED(
         "Session Navigation Limit Reached",
@@ -84,7 +87,8 @@ sealed class PolicyDecision {
     data class HandOffToNativeApp(
         val url: String,
         val scheme: String,
-        val targetPackage: String? = null
+        val targetPackage: String? = null,
+        val action: String = "android.intent.action.VIEW"
     ) : PolicyDecision()
 
     data class Block(
@@ -96,10 +100,10 @@ sealed class PolicyDecision {
 }
 
 /**
- * Evaluates main-frame navigations (`shouldOverrideUrlLoading`) and sub-resource requests
- * (`shouldInterceptRequest`) through the 6-step HM01 policy pipeline:
+ * Evaluates main-frame navigations (`shouldOverrideUrlLoading` & non-GET `shouldInterceptRequest`)
+ * and sub-resource/sub-frame requests through the 6-step HM01 policy pipeline:
  *
- * 1. Scheme, IP-Literal & Native App Handoff
+ * 1. Scheme, Canonicalization, IP-Literal & Native App Handoff
  * 2. Scoped OAuth & Trusted Identity Provider Allowlist (driven by [BrowserPolicyConfig.pathScopedPlatformRules])
  * 3. Search Engine & Proxy Blocker (driven by [BrowserPolicyConfig.searchEngineDomains])
  * 4. Pluggable Blocklist (driven by [BrowserPolicyConfig.blockedDomains], [BrowserPolicyConfig.blockedHostKeywords], [BrowserPolicyConfig.blockedPathRegexes])
@@ -176,30 +180,35 @@ class UrlPolicyEvaluator(
             return PolicyDecision.Block(BlockReason.INSECURE_OR_INVALID_SCHEME, rawUrl, "")
         }
 
-        val scheme = extractScheme(trimmedUrl)
+        val scheme = CanonicalUrl.extractScheme(trimmedUrl)
+        if (scheme.isEmpty()) {
+            return PolicyDecision.Block(BlockReason.INSECURE_OR_INVALID_SCHEME, trimmedUrl, "")
+        }
 
         // =========================================================================
-        // STEP 1: Scheme, IP-Literal & Native App Handoff
+        // STEP 1: Scheme, Canonicalization, IP-Literal & Native App Handoff
         // =========================================================================
         if (scheme != "https") {
             if (scheme == "http") {
-                if (isInitialLaunch && config.upgradeInitialHttpToHttps) {
-                    val upgraded = "https://" + trimmedUrl.substringAfter("://")
-                    return PolicyDecision.UpgradeToHttps(upgraded)
+                val parsedHttp = CanonicalUrl.parseHttpOrHttps(trimmedUrl)
+                if (isInitialLaunch && config.upgradeInitialHttpToHttps && parsedHttp != null && !parsedHttp.isIpLiteral) {
+                    val upgradedCandidate = "https://" + parsedHttp.canonicalUrlString.substringAfter("://")
+                    return PolicyDecision.UpgradeToHttps(upgradedCandidate)
                 }
                 return PolicyDecision.Block(
                     reason = BlockReason.INSECURE_OR_INVALID_SCHEME,
                     url = trimmedUrl,
-                    host = extractFallbackHost(trimmedUrl)
+                    host = parsedHttp?.host.orEmpty()
                 )
             }
 
             if (isAllowedCustomCallbackScheme(scheme, config)) {
-                val targetPkg = config.customCallbackSchemes[scheme]?.targetPackage
+                val targetDescriptor = config.customCallbackSchemes[scheme]
                 return PolicyDecision.HandOffToNativeApp(
                     url = trimmedUrl,
                     scheme = scheme,
-                    targetPackage = targetPkg
+                    targetPackage = targetDescriptor?.targetPackage,
+                    action = targetDescriptor?.action?.takeIf { it.isNotBlank() } ?: "android.intent.action.VIEW"
                 )
             }
 
@@ -210,23 +219,25 @@ class UrlPolicyEvaluator(
             )
         }
 
-        val parsedUri = runCatching { URI(trimmedUrl) }.getOrNull()
-        val rawHost = parsedUri?.host ?: extractFallbackHost(trimmedUrl)
-        val host = rawHost.trim().trimEnd('.').lowercase(Locale.ROOT)
-        if (host.isEmpty()) {
-            return PolicyDecision.Block(BlockReason.INSECURE_OR_INVALID_SCHEME, trimmedUrl, "")
+        val parsed = CanonicalUrl.parseHttpOrHttps(trimmedUrl)
+            ?: return PolicyDecision.Block(BlockReason.INSECURE_OR_INVALID_SCHEME, trimmedUrl, "")
+
+        val host = parsed.host
+        val canonicalUrl = parsed.canonicalUrlString
+        val normalizedPath = parsed.normalizedPath
+        val pathWithQuery = parsed.normalizedPathWithQuery
+
+        if (parsed.isIpLiteral || DomainExtractor.isIpLiteral(host)) {
+            return PolicyDecision.Block(BlockReason.IP_LITERAL_NOT_ALLOWED, canonicalUrl, host)
         }
 
-        val rawPath = parsedUri?.rawPath?.takeIf { it.isNotEmpty() } ?: extractFallbackPath(trimmedUrl)
-        val rawQuery = parsedUri?.rawQuery
-        val pathWithQuery = if (!rawQuery.isNullOrEmpty()) "$rawPath?$rawQuery" else rawPath
-
-        if (DomainExtractor.isIpLiteral(host)) {
-            return PolicyDecision.Block(BlockReason.IP_LITERAL_NOT_ALLOWED, trimmedUrl, host)
+        // Also enforce media stream check on direct main-frame navigations to .mp4 / media URLs
+        if (MediaStreamBlocker.shouldBlockMediaRequest(canonicalUrl, emptyMap(), config)) {
+            return PolicyDecision.Block(BlockReason.MEDIA_STREAM_BLOCKED, canonicalUrl, host)
         }
 
-        if (!isInitialLaunch && nativeAppHandlerDetector?.invoke(trimmedUrl) == true) {
-            return PolicyDecision.HandOffToNativeApp(url = trimmedUrl, scheme = "https")
+        if (!isInitialLaunch && nativeAppHandlerDetector?.invoke(canonicalUrl) == true) {
+            return PolicyDecision.HandOffToNativeApp(url = canonicalUrl, scheme = "https")
         }
 
         val effectiveDomain = DomainExtractor.extractEffectiveDomain(host)
@@ -240,16 +251,20 @@ class UrlPolicyEvaluator(
                 ?: if (!DefaultBaselineLists.isKnownUrlShortener(host, config.urlShortenerDomains)) host else null
         }
 
-        val scopedPlatformResult = DefaultBaselineLists.evaluatePathScopedPlatform(
-            rawHost = host,
-            rawPath = rawPath,
-            initialLandingHost = predictedInitialHost,
-            rules = config.pathScopedPlatformRules
-        )
+        val scopedPlatformResult = if (normalizedPath.length > MAX_REGEX_EVAL_LENGTH) {
+            DefaultBaselineLists.ScopedPlatformResult.BLOCKED_NON_OAUTH_PATH
+        } else {
+            DefaultBaselineLists.evaluatePathScopedPlatform(
+                rawHost = host,
+                rawPath = normalizedPath,
+                initialLandingHost = predictedInitialHost,
+                rules = config.pathScopedPlatformRules
+            )
+        }
         if (scopedPlatformResult == DefaultBaselineLists.ScopedPlatformResult.BLOCKED_NON_OAUTH_PATH &&
             !isExplicitlyAllowedOverride
         ) {
-            return PolicyDecision.Block(BlockReason.NON_OAUTH_PLATFORM_PATH, trimmedUrl, host)
+            return PolicyDecision.Block(BlockReason.NON_OAUTH_PLATFORM_PATH, canonicalUrl, host)
         }
 
         val isTrustedIdpOrScopedOAuth =
@@ -260,8 +275,8 @@ class UrlPolicyEvaluator(
         // STEP 3: Search Engine & Proxy Blocker (Developer-Configured)
         // =========================================================================
         if (config.blockSearchEngines && !isExplicitlyAllowedOverride) {
-            if (DefaultBaselineLists.isSearchEngineOrProxy(host, rawPath, config.searchEngineDomains)) {
-                return PolicyDecision.Block(BlockReason.SEARCH_ENGINE_OR_PROXY, trimmedUrl, host)
+            if (DefaultBaselineLists.isSearchEngineOrProxy(host, normalizedPath, config.searchEngineDomains)) {
+                return PolicyDecision.Block(BlockReason.SEARCH_ENGINE_OR_PROXY, canonicalUrl, host)
             }
         }
 
@@ -269,7 +284,7 @@ class UrlPolicyEvaluator(
         // STEP 4: Pluggable Blocklist (Developer-Configured)
         // =========================================================================
         if (!isExplicitlyAllowedOverride) {
-            val blocklistDecision = evaluateBlocklists(trimmedUrl, host, effectiveDomain, pathWithQuery, config)
+            val blocklistDecision = evaluateBlocklists(canonicalUrl, host, effectiveDomain, pathWithQuery, config)
             if (blocklistDecision != null) {
                 return blocklistDecision
             }
@@ -280,7 +295,7 @@ class UrlPolicyEvaluator(
         // =========================================================================
         synchronized(stateLock) {
             if (totalNavigationHops + 1 > config.maxTotalNavigationHops) {
-                return PolicyDecision.Block(BlockReason.MAX_TOTAL_HOPS_EXCEEDED, trimmedUrl, host)
+                return PolicyDecision.Block(BlockReason.MAX_TOTAL_HOPS_EXCEEDED, canonicalUrl, host)
             }
 
             if (!isTrustedIdpOrScopedOAuth) {
@@ -309,7 +324,7 @@ class UrlPolicyEvaluator(
                             if (maxHops != null && nextExternalHops > maxHops) {
                                 return PolicyDecision.Block(
                                     reason = BlockReason.LINK_LEASH_HOP_LIMIT_EXCEEDED,
-                                    url = trimmedUrl,
+                                    url = canonicalUrl,
                                     host = host
                                 )
                             }
@@ -329,18 +344,18 @@ class UrlPolicyEvaluator(
         if (!isExplicitlyAllowedOverride && config.dnsMode != DnsMode.DISABLED) {
             val activeDohUrl = config.resolveActiveDohEndpointUrl()
             if (config.dnsMode == DnsMode.USER_DEFINED && activeDohUrl.isBlank()) {
-                return PolicyDecision.Block(BlockReason.DNS_NOT_SELECTED, trimmedUrl, host)
+                return PolicyDecision.Block(BlockReason.DNS_NOT_SELECTED, canonicalUrl, host)
             }
             if (activeDohUrl.isNotBlank()) {
                 val dohVerdict = dohResolver.resolve(host)
                 if (dohVerdict == DohVerdict.BLOCK) {
-                    return PolicyDecision.Block(BlockReason.DOH_FAMILY_FILTER_BLOCK, trimmedUrl, host)
+                    return PolicyDecision.Block(BlockReason.DOH_FAMILY_FILTER_BLOCK, canonicalUrl, host)
                 }
             }
         }
 
         return PolicyDecision.Allow(
-            url = trimmedUrl,
+            url = canonicalUrl,
             host = host,
             effectiveDomain = effectiveDomain,
             isTrustedIdpOrScopedOAuth = isTrustedIdpOrScopedOAuth
@@ -348,11 +363,72 @@ class UrlPolicyEvaluator(
     }
 
     /**
-     * Evaluates a background sub-resource request (`shouldInterceptRequest`).
+     * Evaluates a main-frame network request intercepted in `WebViewClient.shouldInterceptRequest`.
+     *
+     * Because Android `WebView` never invokes `shouldOverrideUrlLoading` for HTTP `POST` (or other
+     * non-`GET`) navigations, any non-`GET` main-frame request is evaluated through the full
+     * [evaluateMainFrameNavigation] pipeline in addition to [MediaStreamBlocker].
      */
+    fun evaluateMainFrameInterceptRequest(
+        rawUrl: String,
+        method: String = "GET",
+        requestHeaders: Map<String, String> = emptyMap(),
+        isServerRedirect: Boolean = false
+    ): PolicyDecision {
+        val config = configProvider()
+        val normalizedMethod = method.trim().uppercase(Locale.ROOT).ifEmpty { "GET" }
+
+        if (normalizedMethod != "GET") {
+            val navDecision = evaluateMainFrameNavigation(
+                rawUrl = rawUrl,
+                isInitialLaunch = false,
+                isServerRedirect = isServerRedirect
+            )
+            if (navDecision !is PolicyDecision.Allow) {
+                return navDecision
+            }
+            if (MediaStreamBlocker.shouldBlockMediaRequest(navDecision.url, requestHeaders, config)) {
+                return PolicyDecision.Block(
+                    reason = BlockReason.MEDIA_STREAM_BLOCKED,
+                    url = navDecision.url,
+                    host = navDecision.host
+                )
+            }
+            return navDecision
+        }
+
+        val parsed = CanonicalUrl.parseHttpOrHttps(rawUrl)
+            ?: return PolicyDecision.Block(BlockReason.INSECURE_OR_INVALID_SCHEME, rawUrl, "")
+        if (parsed.scheme != "https") {
+            return PolicyDecision.Block(BlockReason.INSECURE_OR_INVALID_SCHEME, rawUrl, parsed.host)
+        }
+        if (parsed.isIpLiteral || DomainExtractor.isIpLiteral(parsed.host)) {
+            return PolicyDecision.Block(BlockReason.IP_LITERAL_NOT_ALLOWED, parsed.canonicalUrlString, parsed.host)
+        }
+        if (MediaStreamBlocker.shouldBlockMediaRequest(parsed.canonicalUrlString, requestHeaders, config)) {
+            return PolicyDecision.Block(
+                reason = BlockReason.MEDIA_STREAM_BLOCKED,
+                url = parsed.canonicalUrlString,
+                host = parsed.host
+            )
+        }
+
+        return PolicyDecision.Allow(
+            url = parsed.canonicalUrlString,
+            host = parsed.host,
+            effectiveDomain = DomainExtractor.extractEffectiveDomain(parsed.host)
+        )
+    }
+
+    /**
+     * Evaluates a sub-resource or sub-frame (`<iframe>`) request (`shouldInterceptRequest` or
+     * non-main-frame `shouldOverrideUrlLoading`).
+     */
+    @JvmOverloads
     fun evaluateSubResourceRequest(
         rawUrl: String,
-        requestHeaders: Map<String, String> = emptyMap()
+        requestHeaders: Map<String, String> = emptyMap(),
+        isSubFrameNavigation: Boolean = false
     ): PolicyDecision {
         val config = configProvider()
         val trimmedUrl = rawUrl.trim()
@@ -360,50 +436,88 @@ class UrlPolicyEvaluator(
             return PolicyDecision.Block(BlockReason.INSECURE_OR_INVALID_SCHEME, rawUrl, "")
         }
 
-        val scheme = extractScheme(trimmedUrl)
+        val scheme = CanonicalUrl.extractScheme(trimmedUrl)
         if (scheme != "https") {
             return PolicyDecision.Block(
                 reason = BlockReason.INSECURE_OR_INVALID_SCHEME,
                 url = trimmedUrl,
-                host = extractFallbackHost(trimmedUrl)
+                host = ""
             )
         }
 
-        val parsedUri = runCatching { URI(trimmedUrl) }.getOrNull()
-        val rawHost = parsedUri?.host ?: extractFallbackHost(trimmedUrl)
-        val host = rawHost.trim().trimEnd('.').lowercase(Locale.ROOT)
-        if (host.isEmpty()) {
-            return PolicyDecision.Block(BlockReason.INSECURE_OR_INVALID_SCHEME, trimmedUrl, "")
+        val parsed = CanonicalUrl.parseHttpOrHttps(trimmedUrl)
+            ?: return PolicyDecision.Block(BlockReason.INSECURE_OR_INVALID_SCHEME, trimmedUrl, "")
+
+        val host = parsed.host
+        val canonicalUrl = parsed.canonicalUrlString
+        if (parsed.isIpLiteral || DomainExtractor.isIpLiteral(host)) {
+            return PolicyDecision.Block(BlockReason.IP_LITERAL_NOT_ALLOWED, canonicalUrl, host)
         }
 
-        if (DomainExtractor.isIpLiteral(host)) {
-            return PolicyDecision.Block(BlockReason.IP_LITERAL_NOT_ALLOWED, trimmedUrl, host)
-        }
-
-        val rawPath = parsedUri?.rawPath?.takeIf { it.isNotEmpty() } ?: extractFallbackPath(trimmedUrl)
-        val rawQuery = parsedUri?.rawQuery
-        val pathWithQuery = if (!rawQuery.isNullOrEmpty()) "$rawPath?$rawQuery" else rawPath
+        val normalizedPath = parsed.normalizedPath
+        val pathWithQuery = parsed.normalizedPathWithQuery
         val effectiveDomain = DomainExtractor.extractEffectiveDomain(host)
 
         // Media stream lockdown check
-        if (MediaStreamBlocker.shouldBlockMediaRequest(trimmedUrl, requestHeaders, config)) {
-            return PolicyDecision.Block(BlockReason.MEDIA_STREAM_BLOCKED, trimmedUrl, host)
+        if (MediaStreamBlocker.shouldBlockMediaRequest(canonicalUrl, requestHeaders, config)) {
+            return PolicyDecision.Block(BlockReason.MEDIA_STREAM_BLOCKED, canonicalUrl, host)
         }
 
         val isExplicitlyAllowedOverride = isDomainInSet(host, effectiveDomain, config.allowedDomainsOverride)
 
+        // Detect sub-frame navigation (explicit flag from shouldOverrideUrlLoading or Sec-Fetch-Dest / Sec-Fetch-Mode headers)
+        val isSubFrame = isSubFrameNavigation || isSubFrameHeaderRequest(requestHeaders)
+
+        // Step 2: Path-scoped platform rules (always enforced on sub-frames and restricted platform hosts)
+        val currentLandingHost = synchronized(stateLock) { initialLandingHost }
+        val scopedPlatformResult = if (normalizedPath.length > MAX_REGEX_EVAL_LENGTH) {
+            DefaultBaselineLists.ScopedPlatformResult.BLOCKED_NON_OAUTH_PATH
+        } else {
+            DefaultBaselineLists.evaluatePathScopedPlatform(
+                rawHost = host,
+                rawPath = normalizedPath,
+                initialLandingHost = currentLandingHost,
+                rules = config.pathScopedPlatformRules
+            )
+        }
+        if (scopedPlatformResult == DefaultBaselineLists.ScopedPlatformResult.BLOCKED_NON_OAUTH_PATH &&
+            !isExplicitlyAllowedOverride
+        ) {
+            return PolicyDecision.Block(BlockReason.NON_OAUTH_PLATFORM_PATH, canonicalUrl, host)
+        }
+
+        val isTrustedIdpOrScopedOAuth =
+            scopedPlatformResult == DefaultBaselineLists.ScopedPlatformResult.ALLOWED_SCOPED_OAUTH ||
+                DefaultBaselineLists.isDedicatedTrustedIdpOrPaymentOrCaptchaHost(host, config) ||
+                DefaultBaselineLists.isCaptchaHost(host, normalizedPath)
+
         // Search engine / proxy check
         if (config.blockSearchEngines && !isExplicitlyAllowedOverride) {
-            if (DefaultBaselineLists.isSearchEngineOrProxy(host, rawPath, config.searchEngineDomains)) {
-                return PolicyDecision.Block(BlockReason.SEARCH_ENGINE_OR_PROXY, trimmedUrl, host)
+            if (DefaultBaselineLists.isSearchEngineOrProxy(host, normalizedPath, config.searchEngineDomains)) {
+                return PolicyDecision.Block(BlockReason.SEARCH_ENGINE_OR_PROXY, canonicalUrl, host)
             }
         }
 
         // Pluggable blocklists
         if (!isExplicitlyAllowedOverride) {
-            val blocklistDecision = evaluateBlocklists(trimmedUrl, host, effectiveDomain, pathWithQuery, config)
+            val blocklistDecision = evaluateBlocklists(canonicalUrl, host, effectiveDomain, pathWithQuery, config)
             if (blocklistDecision != null) {
                 return blocklistDecision
+            }
+        }
+
+        // Sub-frame cross-domain isolation (Option 4A):
+        // Allow same-effective-domain iframes, Trusted IdP/Payment/Captcha iframes, and allowedDomainsOverride;
+        // block arbitrary third-party surfing iframes unless config.allowThirdPartyIframes is true.
+        if (isSubFrame && !config.allowThirdPartyIframes && !isExplicitlyAllowedOverride && !isTrustedIdpOrScopedOAuth) {
+            val allowedByActiveSessionDomain = synchronized(stateLock) {
+                val landing = landingEffectiveDomain
+                val currentExt = currentExternalDomain
+                (landing != null && effectiveDomain == landing) ||
+                    (currentExt != null && effectiveDomain == currentExt)
+            }
+            if (!allowedByActiveSessionDomain) {
+                return PolicyDecision.Block(BlockReason.THIRD_PARTY_IFRAME_BLOCKED, canonicalUrl, host)
             }
         }
 
@@ -411,21 +525,37 @@ class UrlPolicyEvaluator(
         if (!isExplicitlyAllowedOverride && config.dnsMode != DnsMode.DISABLED) {
             val activeDohUrl = config.resolveActiveDohEndpointUrl()
             if (config.dnsMode == DnsMode.USER_DEFINED && activeDohUrl.isBlank()) {
-                return PolicyDecision.Block(BlockReason.DNS_NOT_SELECTED, trimmedUrl, host)
+                return PolicyDecision.Block(BlockReason.DNS_NOT_SELECTED, canonicalUrl, host)
             }
             if (activeDohUrl.isNotBlank()) {
                 val dohVerdict = dohResolver.resolve(host)
                 if (dohVerdict == DohVerdict.BLOCK) {
-                    return PolicyDecision.Block(BlockReason.DOH_FAMILY_FILTER_BLOCK, trimmedUrl, host)
+                    return PolicyDecision.Block(BlockReason.DOH_FAMILY_FILTER_BLOCK, canonicalUrl, host)
                 }
             }
         }
 
         return PolicyDecision.Allow(
-            url = trimmedUrl,
+            url = canonicalUrl,
             host = host,
-            effectiveDomain = effectiveDomain
+            effectiveDomain = effectiveDomain,
+            isTrustedIdpOrScopedOAuth = isTrustedIdpOrScopedOAuth
         )
+    }
+
+    private fun isSubFrameHeaderRequest(requestHeaders: Map<String, String>): Boolean {
+        if (requestHeaders.isEmpty()) return false
+        for ((rawKey, rawVal) in requestHeaders) {
+            val key = rawKey.trim().lowercase(Locale.ROOT)
+            val value = rawVal.trim().lowercase(Locale.ROOT)
+            if (key == "sec-fetch-dest" && value in SUB_FRAME_FETCH_DESTS) {
+                return true
+            }
+            if (key == "sec-fetch-mode" && (value == "navigate" || value == "nested-navigate")) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun evaluateBlocklists(
@@ -460,12 +590,17 @@ class UrlPolicyEvaluator(
             return PolicyDecision.Block(BlockReason.HOST_BLOCKLIST_KEYWORD, url, host)
         }
 
-        // 4. Developer-Injected Blocked Path Regexes
-        if (config.compiledBlockedPathRegexes.any { regex ->
-                regex.containsMatchIn(pathWithQuery)
+        // 4. Developer-Injected Blocked Path Regexes (with length cap against ReDoS)
+        if (config.compiledBlockedPathRegexes.isNotEmpty()) {
+            if (pathWithQuery.length > MAX_REGEX_EVAL_LENGTH) {
+                return PolicyDecision.Block(BlockReason.HOST_BLOCKLIST_PATH, url, host)
             }
-        ) {
-            return PolicyDecision.Block(BlockReason.HOST_BLOCKLIST_PATH, url, host)
+            if (config.compiledBlockedPathRegexes.any { regex ->
+                    regex.containsMatchIn(pathWithQuery)
+                }
+            ) {
+                return PolicyDecision.Block(BlockReason.HOST_BLOCKLIST_PATH, url, host)
+            }
         }
 
         return null
@@ -474,7 +609,7 @@ class UrlPolicyEvaluator(
     private fun isDomainInSet(host: String, effectiveDomain: String, domainSet: Set<String>): Boolean {
         if (domainSet.isEmpty()) return false
         return domainSet.any { rawEntry ->
-            val entry = rawEntry.trim().trimStart('.').trimEnd('.').lowercase(Locale.ROOT)
+            val entry = DomainExtractor.normalizeHost(rawEntry.trimStart('.'))
             entry.isNotEmpty() && (
                 host == entry ||
                     effectiveDomain == entry ||
@@ -484,33 +619,52 @@ class UrlPolicyEvaluator(
     }
 
     private fun isAllowedCustomCallbackScheme(scheme: String, config: BrowserPolicyConfig): Boolean {
-        val disallowedSchemes = setOf(
-            "http", "https", "file", "javascript", "data", "content", "blob", "about", "intent", "market", "tel", "sms", "mailto"
+        if (scheme in DISALLOWED_SCHEMES) return false
+        if (!CUSTOM_SCHEME_REGEX.matches(scheme)) return false
+        if (config.customCallbackSchemes.containsKey(scheme)) return true
+        return config.allowUnregisteredCustomSchemes
+    }
+
+    companion object {
+        const val MAX_REGEX_EVAL_LENGTH: Int = 2_048
+
+        private val CUSTOM_SCHEME_REGEX = Regex("^[a-z][a-z0-9+.-]*$")
+
+        private val SUB_FRAME_FETCH_DESTS = setOf(
+            "iframe",
+            "frame",
+            "fencedframe",
+            "embed",
+            "object"
         )
-        if (scheme in disallowedSchemes) return false
-        if (config.customCallbackSchemes.containsKey(scheme)) return false.not()
-        return scheme.matches(Regex("^[a-z][a-z0-9+.-]*$"))
-    }
 
-    private fun extractScheme(url: String): String {
-        val colonIndex = url.indexOf(':')
-        if (colonIndex <= 0) return ""
-        return url.substring(0, colonIndex).trim().lowercase(Locale.ROOT)
-    }
-
-    private fun extractFallbackHost(url: String): String {
-        val afterScheme = url.substringAfter("://", "")
-        return afterScheme
-            .substringBefore('/')
-            .substringBefore('?')
-            .substringBefore('#')
-            .substringBefore(':')
-    }
-
-    private fun extractFallbackPath(url: String): String {
-        val afterScheme = url.substringAfter("://", "")
-        val slashIndex = afterScheme.indexOf('/')
-        if (slashIndex < 0) return "/"
-        return afterScheme.substring(slashIndex).substringBefore('?').substringBefore('#')
+        private val DISALLOWED_SCHEMES = setOf(
+            "http",
+            "https",
+            "file",
+            "javascript",
+            "data",
+            "content",
+            "blob",
+            "about",
+            "intent",
+            "market",
+            "tel",
+            "sms",
+            "smsto",
+            "mms",
+            "mmsto",
+            "mailto",
+            "geo",
+            "googlechrome",
+            "chrome",
+            "firefox",
+            "opera",
+            "edge",
+            "brave",
+            "samsunginternet",
+            "vnd.youtube",
+            "youtube"
+        )
     }
 }

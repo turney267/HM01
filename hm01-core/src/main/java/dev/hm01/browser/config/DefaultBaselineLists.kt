@@ -1,5 +1,7 @@
 package dev.hm01.browser.config
 
+import dev.hm01.browser.filter.CanonicalUrl
+import dev.hm01.browser.filter.DomainExtractor
 import java.util.Locale
 
 /**
@@ -137,8 +139,8 @@ object DefaultBaselineLists {
         ) {
             return true
         }
-        val path = (rawPath ?: "").lowercase(Locale.ROOT)
-        if (isGoogleMultiPurposeHost(host) && path.startsWith("/recaptcha")) {
+        val path = (CanonicalUrl.normalizePathForPolicy(rawPath) ?: "").lowercase(Locale.ROOT)
+        if (isGoogleMultiPurposeHost(host) && (path == "/recaptcha" || path.startsWith("/recaptcha/"))) {
             return true
         }
         return false
@@ -164,16 +166,22 @@ object DefaultBaselineLists {
     ): ScopedPlatformResult {
         val host = normalizeHost(rawHost)
         if (host.isEmpty() || rules.isEmpty()) return ScopedPlatformResult.NOT_APPLICABLE
-        val path = (rawPath?.takeIf { it.isNotEmpty() } ?: "/").lowercase(Locale.ROOT)
+        val normalizedPath = CanonicalUrl.normalizePathForPolicy(rawPath)?.lowercase(Locale.ROOT)
 
         for (rule in rules) {
             if (!matchesRuleDomain(host, rule.domain)) continue
 
+            // If the path failed canonicalization (e.g. null byte or malformed percent-encoding), fail closed
+            if (normalizedPath == null) {
+                return ScopedPlatformResult.BLOCKED_NON_OAUTH_PATH
+            }
+
             val matchesPrefix = rule.allowedPathPrefixes.any { prefix ->
-                path.startsWith(prefix.lowercase(Locale.ROOT))
+                val cleanPrefix = prefix.trim().lowercase(Locale.ROOT)
+                cleanPrefix.isNotEmpty() && normalizedPath.startsWith(cleanPrefix)
             }
             val matchesRegex = rule.compiledAllowedPathRegexes.any { regex ->
-                regex.matches(path)
+                regex.matches(normalizedPath)
             }
 
             if (matchesPrefix || matchesRegex) {
@@ -216,7 +224,7 @@ object DefaultBaselineLists {
     ): Boolean {
         val host = normalizeHost(rawHost)
         if (host.isEmpty()) return false
-        val path = (rawPath ?: "/").lowercase(Locale.ROOT)
+        val path = (CanonicalUrl.normalizePathForPolicy(rawPath) ?: rawPath ?: "/").lowercase(Locale.ROOT)
 
         // If google.* or search engine domains are configured, check Google search paths
         if (searchDomains.isNotEmpty() &&
@@ -264,6 +272,6 @@ object DefaultBaselineLists {
     }
 
     internal fun normalizeHost(rawHost: String): String {
-        return rawHost.trim().trimEnd('.').lowercase(Locale.ROOT)
+        return DomainExtractor.normalizeHost(rawHost)
     }
 }

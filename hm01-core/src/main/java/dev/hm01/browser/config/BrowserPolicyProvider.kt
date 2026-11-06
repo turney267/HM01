@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.RestrictionsManager
 import android.os.Bundle
 import dev.hm01.browser.dns.DohResolver
+import java.util.Locale
 
 /**
  * Callback interface allowing a host application (such as Juubun) to present its own native
@@ -48,6 +49,12 @@ object BrowserPolicyProvider {
     @Volatile
     private var dnsSelectionPromptHandler: DnsSelectionPromptHandler? = null
 
+    @Volatile
+    private var cachedRestrictionsSignature: Int? = null
+
+    @Volatile
+    private var cachedRestrictionsConfig: BrowserPolicyConfig? = null
+
     /**
      * Registers a host-provided [DnsSelectionPromptHandler] to display a first-time DNS selection
      * popup when [DnsMode.USER_DEFINED] has no selected DNS server yet.
@@ -67,7 +74,7 @@ object BrowserPolicyProvider {
      * Programmatically sets the active [BrowserPolicyConfig].
      *
      * @throws IllegalArgumentException if [BrowserPolicyConfig.dnsMode] is [DnsMode.USER_DEFINED]
-     * and [BrowserPolicyConfig.userDnsOptions] is empty.
+     * and [BrowserPolicyConfig.userDnsOptions] is empty, or if any configured DoH URL is not a valid `https://` URL.
      */
     @JvmStatic
     fun configure(config: BrowserPolicyConfig) {
@@ -76,10 +83,27 @@ object BrowserPolicyProvider {
                 "DnsMode.USER_DEFINED requires a non-empty userDnsOptions list to be provided by the developer."
             }
         }
+        for (option in config.userDnsOptions) {
+            require(BrowserPolicyConfig.isValidDohEndpointUrl(option.dohEndpointUrl)) {
+                "Invalid DoH endpoint URL in userDnsOptions (${option.id}): must be a valid https:// hostname URL."
+            }
+        }
+        if (!config.customDohUrl.isNullOrBlank()) {
+            require(BrowserPolicyConfig.isValidDohEndpointUrl(config.customDohUrl)) {
+                "Invalid customDohUrl: must be a valid https:// hostname URL."
+            }
+        }
+        if (!config.selectedDnsEndpointUrl.isNullOrBlank()) {
+            require(BrowserPolicyConfig.isValidDohEndpointUrl(config.selectedDnsEndpointUrl)) {
+                "Invalid selectedDnsEndpointUrl: must be a valid https:// hostname URL."
+            }
+        }
+
         programmaticConfig = config
         if (!config.selectedDnsEndpointUrl.isNullOrBlank()) {
             userSelectedDnsUrl = config.selectedDnsEndpointUrl.trim()
         }
+        DohResolver.SharedCacheHolder.INSTANCE.clear()
     }
 
     /**
@@ -89,14 +113,19 @@ object BrowserPolicyProvider {
     fun loadUserDnsSelection(context: Context) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val savedId = prefs.getString(KEY_SELECTED_DNS_ID, null)?.takeIf { it.isNotBlank() }
-        val savedUrl = prefs.getString(KEY_SELECTED_DNS_URL, null)?.takeIf { it.isNotBlank() }
-        userSelectedDnsId = savedId
+        val savedUrl = prefs.getString(KEY_SELECTED_DNS_URL, null)?.takeIf {
+            BrowserPolicyConfig.isValidDohEndpointUrl(it)
+        }
+        userSelectedDnsId = if (savedUrl != null) savedId else null
         userSelectedDnsUrl = savedUrl
     }
 
     /**
      * Updates and persists the user's selected DNS provider or custom DoH endpoint URL,
      * and clears the DoH decision cache so the new DNS filter takes effect immediately.
+     *
+     * @throws IllegalArgumentException if [dohEndpointUrl] is non-null and not a valid `https://` URL,
+     * or if [BrowserPolicyConfig.allowCustomUserDohUrl] is `false` and the URL is not in [BrowserPolicyConfig.userDnsOptions].
      */
     @JvmStatic
     fun setUserSelectedDns(
@@ -106,6 +135,22 @@ object BrowserPolicyProvider {
     ) {
         val cleanId = optionId?.trim()?.takeIf { it.isNotEmpty() }
         val cleanUrl = dohEndpointUrl?.trim()?.takeIf { it.isNotEmpty() }
+
+        if (cleanUrl != null) {
+            require(BrowserPolicyConfig.isValidDohEndpointUrl(cleanUrl)) {
+                "DoH endpoint URL must be a valid https:// hostname URL."
+            }
+            val currentConfig = programmaticConfig
+            if (currentConfig != null && !currentConfig.allowCustomUserDohUrl && currentConfig.userDnsOptions.isNotEmpty()) {
+                val matchesOption = currentConfig.userDnsOptions.any { option ->
+                    option.dohEndpointUrl.trim().equals(cleanUrl, ignoreCase = true)
+                }
+                require(matchesOption) {
+                    "Custom DoH URLs are disabled by policy; selected URL must match one of the configured userDnsOptions."
+                }
+            }
+        }
+
         userSelectedDnsId = cleanId
         userSelectedDnsUrl = cleanUrl
 
@@ -170,6 +215,9 @@ object BrowserPolicyProvider {
         userSelectedDnsId = null
         userSelectedDnsUrl = null
         dnsSelectionPromptHandler = null
+        cachedRestrictionsSignature = null
+        cachedRestrictionsConfig = null
+        DohResolver.SharedCacheHolder.INSTANCE.clear()
     }
 
     /**
@@ -189,7 +237,18 @@ object BrowserPolicyProvider {
         programmaticConfig?.let { config ->
             val activeUserUrl = userSelectedDnsUrl
             return if (config.dnsMode == DnsMode.USER_DEFINED && !activeUserUrl.isNullOrBlank()) {
-                config.copy(selectedDnsEndpointUrl = activeUserUrl)
+                val allowedUrl = if (!config.allowCustomUserDohUrl && config.userDnsOptions.isNotEmpty()) {
+                    activeUserUrl.takeIf { candidate ->
+                        config.userDnsOptions.any { it.dohEndpointUrl.trim().equals(candidate, ignoreCase = true) }
+                    }
+                } else {
+                    activeUserUrl
+                }
+                if (!allowedUrl.isNullOrBlank() && BrowserPolicyConfig.isValidDohEndpointUrl(allowedUrl)) {
+                    config.copy(selectedDnsEndpointUrl = allowedUrl)
+                } else {
+                    config
+                }
             } else {
                 config
             }
@@ -202,7 +261,15 @@ object BrowserPolicyProvider {
             }.getOrNull()
 
             if (restrictions != null && !restrictions.isEmpty) {
-                return parseRestrictionsBundle(restrictions)
+                val signature = computeBundleSignature(restrictions)
+                val cached = cachedRestrictionsConfig
+                if (cached != null && cachedRestrictionsSignature == signature) {
+                    return cached
+                }
+                val parsed = parseRestrictionsBundle(restrictions)
+                cachedRestrictionsSignature = signature
+                cachedRestrictionsConfig = parsed
+                return parsed
             }
         }
 
@@ -215,17 +282,47 @@ object BrowserPolicyProvider {
     @JvmStatic
     fun parseRestrictionsBundle(bundle: Bundle, base: BrowserPolicyConfig = BrowserPolicyConfig()): BrowserPolicyConfig {
         val brandTitle = bundle.getString("brand_title")?.takeIf { it.isNotBlank() } ?: base.brandTitle
-        val customDohUrl = bundle.getString("custom_doh_url")?.takeIf { it.isNotBlank() } ?: base.customDohUrl
+        val rawCustomDohUrl = bundle.getString("custom_doh_url")?.trim()?.takeIf { it.isNotBlank() }
+        val customDohUrl = if (rawCustomDohUrl != null && BrowserPolicyConfig.isValidDohEndpointUrl(rawCustomDohUrl)) {
+            rawCustomDohUrl
+        } else {
+            base.customDohUrl
+        }
+
         val failClosed = if (bundle.containsKey("fail_closed_on_dns_error")) {
             bundle.getBoolean("fail_closed_on_dns_error", base.failClosedOnDnsError)
         } else {
             base.failClosedOnDnsError
         }
 
+        val allowCustomUserDohUrl = if (bundle.containsKey("allow_custom_user_doh_url")) {
+            bundle.getBoolean("allow_custom_user_doh_url", base.allowCustomUserDohUrl)
+        } else {
+            base.allowCustomUserDohUrl
+        }
+
         val blockedDomains = extractStringSet(bundle, "blocked_domains") ?: base.blockedDomains
         val blockedKeywords = extractStringSet(bundle, "blocked_keywords") ?: base.blockedHostKeywords
-        val blockedPathRegexes = extractStringList(bundle, "blocked_path_regexes") ?: base.blockedPathRegexes
+        val blockedPathRegexes = extractRegexStringList(bundle, "blocked_path_regexes") ?: base.blockedPathRegexes
         val allowedDomainsOverride = extractStringSet(bundle, "allowed_domains_override") ?: base.allowedDomainsOverride
+
+        val allowUnregisteredCustomSchemes = if (bundle.containsKey("allow_unregistered_custom_schemes")) {
+            bundle.getBoolean("allow_unregistered_custom_schemes", base.allowUnregisteredCustomSchemes)
+        } else {
+            base.allowUnregisteredCustomSchemes
+        }
+
+        val allowThirdPartyIframes = if (bundle.containsKey("allow_third_party_iframes")) {
+            bundle.getBoolean("allow_third_party_iframes", base.allowThirdPartyIframes)
+        } else {
+            base.allowThirdPartyIframes
+        }
+
+        val stripWebViewUa = if (bundle.containsKey("strip_webview_user_agent_token")) {
+            bundle.getBoolean("strip_webview_user_agent_token", base.stripWebViewUserAgentToken)
+        } else {
+            base.stripWebViewUserAgentToken
+        }
 
         val maxExternalHops = if (bundle.containsKey("max_external_domain_hops")) {
             val rawHops = bundle.getInt("max_external_domain_hops", base.maxExternalDomainHops ?: 1)
@@ -269,10 +366,14 @@ object BrowserPolicyProvider {
             brandTitle = brandTitle,
             customDohUrl = customDohUrl,
             failClosedOnDnsError = failClosed,
+            allowCustomUserDohUrl = allowCustomUserDohUrl,
             blockedDomains = blockedDomains,
             blockedHostKeywords = blockedKeywords,
             blockedPathRegexes = blockedPathRegexes,
             allowedDomainsOverride = allowedDomainsOverride,
+            allowUnregisteredCustomSchemes = allowUnregisteredCustomSchemes,
+            allowThirdPartyIframes = allowThirdPartyIframes,
+            stripWebViewUserAgentToken = stripWebViewUa,
             maxExternalDomainHops = maxExternalHops,
             maxTotalNavigationHops = maxTotalHops,
             sessionTimeoutMs = sessionTimeoutMs,
@@ -280,6 +381,89 @@ object BrowserPolicyProvider {
             capImageDimensions = capImages,
             blockSearchEngines = blockSearch
         )
+    }
+
+    /**
+     * Splits a delimiter-separated list while preserving commas inside regex quantifiers `{m,n}`
+     * and character classes `[...]`, as well as escaped delimiters `\,`.
+     */
+    @JvmStatic
+    internal fun splitConfigListPreservingQuantifiers(raw: String): List<String> {
+        if (raw.isEmpty()) return emptyList()
+        val result = mutableListOf<String>()
+        val current = StringBuilder()
+        var braceDepth = 0
+        var bracketDepth = 0
+        var escaped = false
+
+        for (ch in raw) {
+            if (escaped) {
+                current.append(ch)
+                escaped = false
+                continue
+            }
+            when (ch) {
+                '\\' -> {
+                    current.append(ch)
+                    escaped = true
+                }
+                '[' -> {
+                    bracketDepth++
+                    current.append(ch)
+                }
+                ']' -> {
+                    if (bracketDepth > 0) bracketDepth--
+                    current.append(ch)
+                }
+                '{' -> {
+                    if (bracketDepth == 0) braceDepth++
+                    current.append(ch)
+                }
+                '}' -> {
+                    if (bracketDepth == 0 && braceDepth > 0) braceDepth--
+                    current.append(ch)
+                }
+                '\n', ';' -> {
+                    if (bracketDepth == 0 && braceDepth == 0) {
+                        val token = current.toString().trim()
+                        if (token.isNotEmpty()) result.add(token)
+                        current.setLength(0)
+                    } else {
+                        current.append(ch)
+                    }
+                }
+                ',' -> {
+                    if (bracketDepth == 0 && braceDepth == 0) {
+                        val token = current.toString().trim()
+                        if (token.isNotEmpty()) result.add(token)
+                        current.setLength(0)
+                    } else {
+                        current.append(ch)
+                    }
+                }
+                else -> current.append(ch)
+            }
+        }
+        val tail = current.toString().trim()
+        if (tail.isNotEmpty()) {
+            result.add(tail)
+        }
+        return result
+    }
+
+    private fun extractRegexStringList(bundle: Bundle, key: String): List<String>? {
+        if (!bundle.containsKey(key)) return null
+        val arrayValue = bundle.getStringArray(key)
+        if (arrayValue != null) {
+            return arrayValue
+                .flatMap { splitConfigListPreservingQuantifiers(it) }
+                .filter { it.isNotEmpty() }
+        }
+        val stringValue = bundle.getString(key)
+        if (stringValue != null) {
+            return splitConfigListPreservingQuantifiers(stringValue)
+        }
+        return emptyList()
     }
 
     private fun extractStringList(bundle: Bundle, key: String): List<String>? {
@@ -302,6 +486,21 @@ object BrowserPolicyProvider {
     }
 
     private fun extractStringSet(bundle: Bundle, key: String): Set<String>? {
-        return extractStringList(bundle, key)?.map { it.lowercase() }?.toSet()
+        return extractStringList(bundle, key)?.map { it.lowercase(Locale.ROOT) }?.toSet()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun computeBundleSignature(bundle: Bundle): Int {
+        var result = 1
+        for (key in bundle.keySet().sorted()) {
+            result = 31 * result + key.hashCode()
+            val value = bundle.get(key)
+            val valHash = when (value) {
+                is Array<*> -> value.contentDeepHashCode()
+                else -> value?.hashCode() ?: 0
+            }
+            result = 31 * result + valHash
+        }
+        return result
     }
 }

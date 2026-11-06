@@ -12,17 +12,21 @@ import android.graphics.drawable.ClipDrawable
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.LayerDrawable
 import android.net.Uri
+import android.net.http.SslError
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -34,9 +38,13 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import dev.hm01.browser.config.BrowserPolicyConfig
 import dev.hm01.browser.config.BrowserPolicyProvider
 import dev.hm01.browser.config.DnsMode
+import dev.hm01.browser.filter.BlockReason
+import dev.hm01.browser.filter.CanonicalUrl
 import dev.hm01.browser.filter.MediaStreamBlocker
 import dev.hm01.browser.filter.PolicyDecision
 import dev.hm01.browser.filter.UrlPolicyEvaluator
@@ -55,6 +63,7 @@ class IntentBrowserActivity : Activity() {
     private lateinit var policyEvaluator: UrlPolicyEvaluator
 
     private var webView: WebView? = null
+    private val activePopupWebViews = mutableSetOf<WebView>()
     private lateinit var hostnameView: TextView
     private lateinit var lockIconView: TextView
     private lateinit var progressBar: ProgressBar
@@ -65,10 +74,23 @@ class IntentBrowserActivity : Activity() {
         closeAndWipeSession()
     }
 
-    private var isSessionWiped = false
+    private var sessionStartElapsedRealtimeMs: Long = 0L
+    private var committedHost: String? = null
+    private var isBlockedScreenVisible: Boolean = false
+    private var isSessionWiped: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        val initialRawUrl = intent?.dataString?.trim()
+        if (initialRawUrl.isNullOrEmpty()) {
+            isSessionWiped = true
+            finishAndRemoveTask()
+            return
+        }
+
+        // Defensively wipe any leftover disk state from a prior OS-killed session before starting
+        wipeSessionStorageOnly(applicationContext)
 
         activeConfig = BrowserPolicyProvider.getConfig(applicationContext)
         val dohResolver = BrowserPolicyProvider.getDohResolver(applicationContext)
@@ -89,10 +111,69 @@ class IntentBrowserActivity : Activity() {
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
+        val rawUrl = intent?.dataString?.trim()
+        // Ignore empty/malformed external intents so other apps cannot remotely wipe an active session
+        if (rawUrl.isNullOrEmpty()) {
+            return
+        }
+
         setIntent(intent)
-        policyEvaluator.resetSession()
+        resetSessionAndWebView()
         scheduleSessionTimeout()
         handleLaunchIntent(intent)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        checkElapsedSessionTimeout()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        checkElapsedSessionTimeout()
+    }
+
+    private fun checkElapsedSessionTimeout() {
+        if (!::activeConfig.isInitialized || isSessionWiped) return
+        val timeoutMs = activeConfig.sessionTimeoutMs
+        if (timeoutMs <= 0L || sessionStartElapsedRealtimeMs <= 0L) return
+
+        val elapsedMs = SystemClock.elapsedRealtime() - sessionStartElapsedRealtimeMs
+        if (elapsedMs >= timeoutMs) {
+            closeAndWipeSession()
+        } else {
+            mainHandler.removeCallbacks(sessionTimeoutRunnable)
+            mainHandler.postDelayed(sessionTimeoutRunnable, timeoutMs - elapsedMs)
+        }
+    }
+
+    private fun resetSessionAndWebView() {
+        destroyAllPopupWebViews()
+        val oldWv = webView
+        webView = null
+        if (oldWv != null && ::webContainer.isInitialized) {
+            webContainer.removeView(oldWv)
+        }
+        wipeEphemeralWebData(applicationContext, oldWv)
+
+        activeConfig = BrowserPolicyProvider.getConfig(applicationContext)
+        committedHost = null
+        isBlockedScreenVisible = false
+        isSessionWiped = false
+        policyEvaluator.resetSession()
+
+        if (::webContainer.isInitialized) {
+            val freshWv = createConfiguredWebView()
+            webView = freshWv
+            webContainer.addView(
+                freshWv,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+            updateProvisionalLoadingHeader()
+        }
     }
 
     private fun handleLaunchIntent(launchIntent: Intent?) {
@@ -155,18 +236,26 @@ class IntentBrowserActivity : Activity() {
     ): Boolean {
         return when (decision) {
             is PolicyDecision.Allow -> {
-                updateVerifiedHostHeader(decision.host, isBlocked = false)
+                isBlockedScreenVisible = false
+                // Do not display a verified green lock for the new host until the navigation commits
+                updateProvisionalLoadingHeader()
                 if (loadIntoWebViewOnAllow) {
                     webView?.loadUrl(decision.url)
                 }
                 false // Allow WebView navigation when called from shouldOverrideUrlLoading
             }
             is PolicyDecision.UpgradeToHttps -> {
+                isBlockedScreenVisible = false
+                updateProvisionalLoadingHeader()
                 webView?.loadUrl(decision.httpsUrl)
                 true
             }
             is PolicyDecision.HandOffToNativeApp -> {
-                launchSanitizedExternalIntent(decision.url, decision.targetPackage)
+                launchSanitizedExternalIntent(
+                    url = decision.url,
+                    targetPackage = decision.targetPackage,
+                    action = decision.action
+                )
                 closeAndWipeSession()
                 true
             }
@@ -178,6 +267,8 @@ class IntentBrowserActivity : Activity() {
     }
 
     private fun renderBlockedScreen(decision: PolicyDecision.Block) {
+        isBlockedScreenVisible = true
+        committedHost = null
         updateVerifiedHostHeader(
             host = decision.host.ifBlank { activeConfig.brandTitle },
             isBlocked = true
@@ -193,8 +284,42 @@ class IntentBrowserActivity : Activity() {
         )
     }
 
+    /**
+     * Updates the header during provisional navigation without spoofing a verified green lock (`🔒`)
+     * for an uncommitted destination. If a page is already committed and visible on screen, its
+     * hostname remains displayed until the new document commits.
+     */
+    private fun updateProvisionalLoadingHeader() {
+        runOnUiThread {
+            if (!::lockIconView.isInitialized || !::hostnameView.isInitialized) return@runOnUiThread
+            val currentCommitted = committedHost
+            if (!currentCommitted.isNullOrBlank() && !isBlockedScreenVisible) {
+                lockIconView.text = "\uD83D\uDD12"
+                lockIconView.setTextColor(Color.parseColor("#16A34A"))
+                hostnameView.text = currentCommitted
+            } else if (!isBlockedScreenVisible) {
+                lockIconView.text = "\u2026" // Neutral ellipsis while connecting
+                lockIconView.setTextColor(Color.parseColor("#64748B"))
+                hostnameView.text = activeConfig.brandTitle
+            }
+        }
+    }
+
+    private fun syncCommittedHostHeader(view: WebView?, callbackUrl: String?) {
+        if (isBlockedScreenVisible) return
+        val candidateUrl = view?.url?.takeIf { it.isNotBlank() } ?: callbackUrl ?: return
+        if (candidateUrl == "about:blank") return
+
+        val parsed = CanonicalUrl.parseHttpOrHttps(candidateUrl)
+        if (parsed != null && parsed.scheme == "https" && parsed.host.isNotBlank()) {
+            committedHost = parsed.host
+            updateVerifiedHostHeader(host = parsed.host, isBlocked = false)
+        }
+    }
+
     private fun updateVerifiedHostHeader(host: String, isBlocked: Boolean) {
         runOnUiThread {
+            if (!::lockIconView.isInitialized || !::hostnameView.isInitialized) return@runOnUiThread
             if (isBlocked) {
                 lockIconView.text = "\u26A0" // Warning sign
                 lockIconView.setTextColor(Color.parseColor("#DC2626"))
@@ -207,7 +332,7 @@ class IntentBrowserActivity : Activity() {
         }
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
+    @SuppressLint("SetJavaScriptEnabled", "RequiresFeature")
     private fun createConfiguredWebView(): WebView {
         val wv = WebView(this)
         val settings = wv.settings
@@ -221,11 +346,11 @@ class IntentBrowserActivity : Activity() {
         settings.setGeolocationEnabled(false)
         @Suppress("DEPRECATION")
         settings.saveFormData = false
-        // Support popup windows (e.g., Google 2-Step Verification & OAuth popups) by intercepting
-        // them in WebChromeClient.onCreateWindow and routing their URLs through the policy evaluator
-        // into the single main WebView.
+        // Support user-initiated popup windows (e.g., Google 2-Step Verification & OAuth popups) by
+        // intercepting them in WebChromeClient.onCreateWindow and routing their URLs through the
+        // policy evaluator into the single main WebView.
         settings.setSupportMultipleWindows(true)
-        settings.javaScriptCanOpenWindowsAutomatically = true
+        settings.javaScriptCanOpenWindowsAutomatically = false
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         settings.mediaPlaybackRequiresUserGesture = true
         settings.builtInZoomControls = true
@@ -234,10 +359,11 @@ class IntentBrowserActivity : Activity() {
         settings.loadWithOverviewMode = true
         settings.cacheMode = WebSettings.LOAD_NO_CACHE
 
-        // Strip "; wv" and "Version/4.0" so Google OAuth & strict OIDC providers treat HM01 as a compliant Custom Tab
-        settings.userAgentString = MinimalCustomTabsService.sanitizeCustomTabUserAgent(
-            settings.userAgentString
-        )
+        if (activeConfig.stripWebViewUserAgentToken) {
+            settings.userAgentString = MinimalCustomTabsService.sanitizeCustomTabUserAgent(
+                settings.userAgentString
+            )
+        }
 
         if (!activeConfig.allowDownloads) {
             wv.setDownloadListener { _, _, _, _, _ ->
@@ -248,8 +374,19 @@ class IntentBrowserActivity : Activity() {
         val cookieManager = CookieManager.getInstance()
         cookieManager.setAcceptCookie(true)
         // Cross-domain OAuth / 2SV challenges (e.g. accounts.google.com <-> myaccount.google.com)
-        // require cookies during the ephemeral session; all cookies are wiped on close/timeout.
+        // require cookies during the ephemeral session; all cookies are wiped on close/timeout/new-intent.
         cookieManager.setAcceptThirdPartyCookies(wv, true)
+
+        // Inject media/MSE/WebRTC/CSS lockdown at document start across ALL frames (including iframes)
+        runCatching {
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                WebViewCompat.addDocumentStartJavaScript(
+                    wv,
+                    MediaStreamBlocker.buildLockdownJavascript(activeConfig),
+                    setOf("*")
+                )
+            }
+        }
 
         wv.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
@@ -273,16 +410,34 @@ class IntentBrowserActivity : Activity() {
                 isUserGesture: Boolean,
                 resultMsg: android.os.Message?
             ): Boolean {
+                // Reject background/automated popups not triggered by an explicit user gesture
+                if (!isUserGesture) return false
                 val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
-                val popupWebView = WebView(this@IntentBrowserActivity)
+
+                val popupWebView = WebView(this@IntentBrowserActivity).apply {
+                    settings.javaScriptEnabled = false
+                    settings.allowFileAccess = false
+                    settings.allowContentAccess = false
+                    settings.setGeolocationEnabled(false)
+                    settings.domStorageEnabled = false
+                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                }
+                activePopupWebViews.add(popupWebView)
+
+                val timeoutCleanup = Runnable {
+                    destroyPopupWebView(popupWebView)
+                }
+                mainHandler.postDelayed(timeoutCleanup, POPUP_CAPTURE_TIMEOUT_MS)
+
                 popupWebView.webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(
-                        popupView: WebView?,
-                        request: WebResourceRequest?
-                    ): Boolean {
-                        val targetUrl = request?.url?.toString()
-                        popupView?.destroy()
-                        if (!targetUrl.isNullOrBlank()) {
+                    private var handled = false
+
+                    private fun handlePopupTargetUrl(targetUrl: String?) {
+                        if (handled) return
+                        handled = true
+                        mainHandler.removeCallbacks(timeoutCleanup)
+                        destroyPopupWebView(popupWebView)
+                        if (!targetUrl.isNullOrBlank() && targetUrl != "about:blank") {
                             val decision = policyEvaluator.evaluateMainFrameNavigation(
                                 rawUrl = targetUrl,
                                 isInitialLaunch = false,
@@ -290,9 +445,28 @@ class IntentBrowserActivity : Activity() {
                             )
                             applyMainFrameDecision(decision, loadIntoWebViewOnAllow = true)
                         }
+                    }
+
+                    override fun shouldOverrideUrlLoading(
+                        popupView: WebView?,
+                        request: WebResourceRequest?
+                    ): Boolean {
+                        handlePopupTargetUrl(request?.url?.toString())
                         return true
                     }
+
+                    override fun shouldInterceptRequest(
+                        popupView: WebView?,
+                        request: WebResourceRequest?
+                    ): WebResourceResponse? {
+                        val targetUrl = request?.url?.toString()
+                        if (!targetUrl.isNullOrBlank() && targetUrl != "about:blank") {
+                            mainHandler.post { handlePopupTargetUrl(targetUrl) }
+                        }
+                        return BlockedPageRenderer.createEmptyBlockedSubResourceResponse()
+                    }
                 }
+
                 transport.webView = popupWebView
                 resultMsg.sendToTarget()
                 return true
@@ -311,9 +485,10 @@ class IntentBrowserActivity : Activity() {
                 if (!request.isForMainFrame) {
                     val subDecision = policyEvaluator.evaluateSubResourceRequest(
                         rawUrl = targetUrl,
-                        requestHeaders = request.requestHeaders ?: emptyMap()
+                        requestHeaders = request.requestHeaders ?: emptyMap(),
+                        isSubFrameNavigation = true
                     )
-                    return subDecision is PolicyDecision.Block
+                    return subDecision !is PolicyDecision.Allow
                 }
 
                 val isRedirect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -341,16 +516,36 @@ class IntentBrowserActivity : Activity() {
                 val headers = req.requestHeaders ?: emptyMap()
 
                 if (req.isForMainFrame) {
-                    // Enforce media stream check even on main-frame direct links to .mp4 / video files
-                    if (MediaStreamBlocker.shouldBlockMediaRequest(targetUrl, headers, activeConfig)) {
-                        val blockDecision = PolicyDecision.Block(
-                            reason = dev.hm01.browser.filter.BlockReason.MEDIA_STREAM_BLOCKED,
-                            url = targetUrl,
-                            host = req.url?.host ?: ""
-                        )
-                        return BlockedPageRenderer.createBlockedHtmlResponse(blockDecision, activeConfig)
+                    val isRedirect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        req.isRedirect
+                    } else {
+                        false
                     }
-                    return null
+                    val mainInterceptDecision = policyEvaluator.evaluateMainFrameInterceptRequest(
+                        rawUrl = targetUrl,
+                        method = req.method ?: "GET",
+                        requestHeaders = headers,
+                        isServerRedirect = isRedirect
+                    )
+                    return when (mainInterceptDecision) {
+                        is PolicyDecision.Allow -> null
+                        is PolicyDecision.Block -> {
+                            isBlockedScreenVisible = true
+                            committedHost = null
+                            updateVerifiedHostHeader(
+                                host = mainInterceptDecision.host.ifBlank { activeConfig.brandTitle },
+                                isBlocked = true
+                            )
+                            BlockedPageRenderer.createBlockedHtmlResponse(mainInterceptDecision, activeConfig)
+                        }
+                        is PolicyDecision.HandOffToNativeApp,
+                        is PolicyDecision.UpgradeToHttps -> {
+                            mainHandler.post {
+                                applyMainFrameDecision(mainInterceptDecision, loadIntoWebViewOnAllow = true)
+                            }
+                            BlockedPageRenderer.createEmptyBlockedSubResourceResponse()
+                        }
+                    }
                 }
 
                 val subDecision = policyEvaluator.evaluateSubResourceRequest(
@@ -366,29 +561,81 @@ class IntentBrowserActivity : Activity() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 super.onPageStarted(view, url, favicon)
                 if (url != null && url != "about:blank") {
-                    val host = runCatching { Uri.parse(url).host }.getOrNull().orEmpty()
-                    if (host.isNotBlank()) {
-                        updateVerifiedHostHeader(host, isBlocked = false)
-                    }
+                    updateProvisionalLoadingHeader()
                 }
                 injectMediaLockdownScript(view)
             }
 
             override fun onPageCommitVisible(view: WebView?, url: String?) {
                 super.onPageCommitVisible(view, url)
+                syncCommittedHostHeader(view, url)
                 injectMediaLockdownScript(view)
+            }
+
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                super.doUpdateVisitedHistory(view, url, isReload)
+                syncCommittedHostHeader(view, url)
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
+                syncCommittedHostHeader(view, url)
                 injectMediaLockdownScript(view)
                 if (url != null && url != "about:blank") {
                     policyEvaluator.markRedirectGraceComplete()
                 }
             }
+
+            override fun onReceivedSslError(
+                view: WebView?,
+                handler: SslErrorHandler?,
+                error: SslError?
+            ) {
+                handler?.cancel()
+                val failingUrl = error?.url.orEmpty()
+                val failingHost = CanonicalUrl.parseHttpOrHttps(failingUrl)?.host.orEmpty()
+                renderBlockedScreen(
+                    PolicyDecision.Block(
+                        reason = BlockReason.INSECURE_OR_INVALID_SCHEME,
+                        url = failingUrl,
+                        host = failingHost
+                    )
+                )
+            }
+
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?
+            ) {
+                super.onReceivedError(view, request, error)
+                if (request?.isForMainFrame == true) {
+                    syncCommittedHostHeader(view, view?.url)
+                }
+            }
         }
 
         return wv
+    }
+
+    private fun destroyPopupWebView(popupView: WebView?) {
+        if (popupView == null) return
+        activePopupWebViews.remove(popupView)
+        runCatching {
+            popupView.stopLoading()
+            popupView.destroy()
+        }
+    }
+
+    private fun destroyAllPopupWebViews() {
+        val snapshot = activePopupWebViews.toList()
+        activePopupWebViews.clear()
+        for (popup in snapshot) {
+            runCatching {
+                popup.stopLoading()
+                popup.destroy()
+            }
+        }
     }
 
     private fun injectMediaLockdownScript(view: WebView?) {
@@ -442,7 +689,8 @@ class IntentBrowserActivity : Activity() {
 
         lockIconView = TextView(this).apply {
             id = ID_LOCK_ICON
-            text = "\uD83D\uDD12"
+            text = "\u2026"
+            setTextColor(Color.parseColor("#64748B"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setPadding(0, 0, dpToPx(6), 0)
         }
@@ -566,34 +814,49 @@ class IntentBrowserActivity : Activity() {
 
     private fun scheduleSessionTimeout() {
         mainHandler.removeCallbacks(sessionTimeoutRunnable)
+        sessionStartElapsedRealtimeMs = SystemClock.elapsedRealtime()
         val timeoutMs = activeConfig.sessionTimeoutMs
         if (timeoutMs > 0L) {
             mainHandler.postDelayed(sessionTimeoutRunnable, timeoutMs)
         }
     }
 
-    private fun launchSanitizedExternalIntent(url: String, targetPackage: String?) {
+    /**
+     * Launches an external native application or custom OAuth callback scheme.
+     *
+     * When [targetPackage] is configured, retries without `CATEGORY_BROWSABLE` **only within that
+     * same [targetPackage]** and never falls back to an unpinned broadcast (preventing OAuth
+     * authorization code interception by scheme-squatting apps).
+     */
+    private fun launchSanitizedExternalIntent(
+        url: String,
+        targetPackage: String?,
+        action: String = Intent.ACTION_VIEW
+    ) {
+        val resolvedAction = action.trim().takeIf { it.isNotEmpty() } ?: Intent.ACTION_VIEW
+        val cleanTargetPackage = targetPackage?.trim()?.takeIf { it.isNotEmpty() }
+
         runCatching {
-            val handoffIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                addCategory(Intent.CATEGORY_BROWSABLE)
-                component = null
-                selector = null
-                if (!targetPackage.isNullOrBlank()) {
-                    setPackage(targetPackage)
-                }
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
+            val handoffIntent = buildSanitizedHandoffIntent(
+                url = url,
+                action = resolvedAction,
+                targetPackage = cleanTargetPackage,
+                requireBrowsable = true
+            )
             startActivity(handoffIntent)
         }.onFailure {
-            if (!targetPackage.isNullOrBlank()) {
+            // Option 2A: If a specific targetPackage is configured and its callback Activity declared
+            // CATEGORY_DEFAULT without CATEGORY_BROWSABLE, retry still pinned to targetPackage.
+            // Never drop targetPackage!
+            if (cleanTargetPackage != null) {
                 runCatching {
-                    val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                        addCategory(Intent.CATEGORY_BROWSABLE)
-                        component = null
-                        selector = null
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    startActivity(fallbackIntent)
+                    val pinnedFallbackIntent = buildSanitizedHandoffIntent(
+                        url = url,
+                        action = resolvedAction,
+                        targetPackage = cleanTargetPackage,
+                        requireBrowsable = false
+                    )
+                    startActivity(pinnedFallbackIntent)
                 }
             }
         }
@@ -605,11 +868,12 @@ class IntentBrowserActivity : Activity() {
      */
     fun closeAndWipeSession() {
         mainHandler.removeCallbacks(sessionTimeoutRunnable)
+        destroyAllPopupWebViews()
         if (!isSessionWiped) {
             isSessionWiped = true
             val currentWv = webView
             webView = null
-            if (currentWv != null) {
+            if (currentWv != null && ::webContainer.isInitialized) {
                 webContainer.removeView(currentWv)
             }
             wipeEphemeralWebData(applicationContext, currentWv)
@@ -621,11 +885,12 @@ class IntentBrowserActivity : Activity() {
 
     override fun onDestroy() {
         mainHandler.removeCallbacks(sessionTimeoutRunnable)
+        destroyAllPopupWebViews()
         if (!isSessionWiped) {
             isSessionWiped = true
             val currentWv = webView
             webView = null
-            if (currentWv != null) {
+            if (currentWv != null && ::webContainer.isInitialized) {
                 webContainer.removeView(currentWv)
             }
             wipeEphemeralWebData(applicationContext, currentWv)
@@ -649,11 +914,33 @@ class IntentBrowserActivity : Activity() {
         const val ID_BUTTON_CLOSE = 0x7F0B0005
         const val ID_PROGRESS_BAR = 0x7F0B0006
 
-        /**
-         * Wipes all cookies, WebStorage, HTTP auth credentials, cache, form data, and history.
-         */
+        private const val POPUP_CAPTURE_TIMEOUT_MS = 3_000L
+
         @JvmStatic
-        fun wipeEphemeralWebData(context: Context?, webView: WebView?) {
+        internal fun buildSanitizedHandoffIntent(
+            url: String,
+            action: String = Intent.ACTION_VIEW,
+            targetPackage: String? = null,
+            requireBrowsable: Boolean = true
+        ): Intent {
+            val resolvedAction = action.trim().takeIf { it.isNotEmpty() } ?: Intent.ACTION_VIEW
+            return Intent(resolvedAction, Uri.parse(url)).apply {
+                if (requireBrowsable) {
+                    addCategory(Intent.CATEGORY_BROWSABLE)
+                } else {
+                    addCategory(Intent.CATEGORY_DEFAULT)
+                }
+                component = null
+                selector = null
+                if (!targetPackage.isNullOrBlank()) {
+                    setPackage(targetPackage.trim())
+                }
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        }
+
+        @JvmStatic
+        internal fun wipeSessionStorageOnly(context: Context?) {
             runCatching {
                 val cookieManager = CookieManager.getInstance()
                 cookieManager.removeAllCookies(null)
@@ -667,6 +954,14 @@ class IntentBrowserActivity : Activity() {
                     WebViewDatabase.getInstance(context).clearHttpAuthUsernamePassword()
                 }
             }
+        }
+
+        /**
+         * Wipes all cookies, WebStorage, HTTP auth credentials, cache, form data, and history.
+         */
+        @JvmStatic
+        fun wipeEphemeralWebData(context: Context?, webView: WebView?) {
+            wipeSessionStorageOnly(context)
             if (webView != null) {
                 runCatching {
                     webView.stopLoading()

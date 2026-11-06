@@ -1,5 +1,6 @@
 package dev.hm01.browser.config
 
+import dev.hm01.browser.filter.CanonicalUrl
 import java.util.Locale
 
 /**
@@ -13,7 +14,7 @@ enum class DnsMode {
     USER_DEFINED,
 
     /**
-     * Uses a single developer-configured DoH endpoint via [BrowserPolicyConfig.dohPreset] or
+     * Uses a single developer-configured DoH endpoint via [BrowserPolicyConfig.selectedDnsEndpointUrl] or
      * [BrowserPolicyConfig.customDohUrl].
      */
     DEVELOPER_FIXED,
@@ -78,7 +79,8 @@ data class BrowserPolicyConfig(
     val userDnsOptions: List<DnsProviderOption> = emptyList(),
     val selectedDnsEndpointUrl: String? = null,
     val customDohUrl: String? = null,
-    val failClosedOnDnsError: Boolean = false,
+    val failClosedOnDnsError: Boolean = true,
+    val allowCustomUserDohUrl: Boolean = true,
     val blockedDomains: Set<String> = emptySet(),
     val blockedTlds: Set<String> = emptySet(),
     val blockedHostKeywords: Set<String> = emptySet(),
@@ -90,6 +92,9 @@ data class BrowserPolicyConfig(
     val urlShortenerDomains: Set<String> = DefaultBaselineLists.KNOWN_URL_SHORTENERS,
     val allowedDomainsOverride: Set<String> = emptySet(),
     val customCallbackSchemes: Map<String, CustomSchemeTarget> = emptyMap(),
+    val allowUnregisteredCustomSchemes: Boolean = false,
+    val allowThirdPartyIframes: Boolean = false,
+    val stripWebViewUserAgentToken: Boolean = true,
     /**
      * Maximum number of external domain hops allowed outside the initial landing domain ("Link Leash").
      * Defaults to `1`. Set to `null` (or call [withoutLinkLeash]) to disable the Link Leash completely.
@@ -166,5 +171,18 @@ data class BrowserPolicyConfig(
          * Developers can replace or clear this set in [BrowserPolicyConfig].
          */
         val DEFAULT_EXAMPLE_MEDIA_EXTENSIONS: Set<String> = setOf(".mp4")
+
+        /**
+         * Validates that [rawUrl] is a strictly well-formed `https://` DoH endpoint URL with a non-empty,
+         * non-IP-literal hostname.
+         */
+        @JvmStatic
+        fun isValidDohEndpointUrl(rawUrl: String?): Boolean {
+            if (rawUrl.isNullOrBlank()) return false
+            val parsed = CanonicalUrl.parseHttpOrHttps(rawUrl) ?: return false
+            if (parsed.scheme != "https") return false
+            if (parsed.host.isEmpty() || parsed.isIpLiteral || parsed.host == "localhost") return false
+            return true
+        }
     }
 }

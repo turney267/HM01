@@ -3,11 +3,14 @@ package dev.hm01.browser.dns
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Verdict returned by CleanBrowsing DNS-over-HTTPS evaluation.
+ * Verdict returned by DNS-over-HTTPS evaluation.
  */
 enum class DohVerdict {
     ALLOW,
@@ -15,16 +18,17 @@ enum class DohVerdict {
 }
 
 /**
- * Thread-safe LRU + TTL cache for DNS-over-HTTPS hostname verdicts, with coalesced in-flight lookups.
+ * Thread-safe LRU + TTL cache for DNS-over-HTTPS hostname verdicts, with coalesced in-flight lookups
+ * and a bounded background worker pool.
  *
- * - Default max capacity: 2,000 hostnames
- * - Default TTL: 30 minutes
- * - Coalesces concurrent requests for the same hostname via [CompletableFuture] so simultaneous
+ * - Default max capacity: 2,000 entries
+ * - Default max TTL: 30 minutes
+ * - Coalesces concurrent requests for the same key via [CompletableFuture] so simultaneous
  *   sub-resource loads for the same CDN host only trigger a single network lookup.
  */
 class DohDecisionCache(
     private val maxEntries: Int = DEFAULT_MAX_ENTRIES,
-    private val defaultTtlMs: Long = DEFAULT_TTL_MS,
+    val defaultTtlMs: Long = DEFAULT_TTL_MS,
     private val clockMs: () -> Long = { System.currentTimeMillis() }
 ) {
     private data class CacheEntry(
@@ -45,7 +49,7 @@ class DohDecisionCache(
      * Returns the cached [DohVerdict] for [hostname] if present and not expired, or `null`.
      */
     fun get(hostname: String): DohVerdict? {
-        val key = normalizeHost(hostname)
+        val key = normalizeKey(hostname)
         if (key.isEmpty()) return null
         val now = clockMs()
         synchronized(lock) {
@@ -62,9 +66,10 @@ class DohDecisionCache(
      * Stores [verdict] for [hostname] in the LRU cache with the specified [ttlMs].
      */
     fun put(hostname: String, verdict: DohVerdict, ttlMs: Long = defaultTtlMs) {
-        val key = normalizeHost(hostname)
+        val key = normalizeKey(hostname)
         if (key.isEmpty() || ttlMs <= 0L) return
-        val expiresAt = clockMs() + ttlMs
+        val cappedTtlMs = ttlMs.coerceAtMost(defaultTtlMs)
+        val expiresAt = clockMs() + cappedTtlMs
         synchronized(lock) {
             lruMap[key] = CacheEntry(verdict = verdict, expiresAtMs = expiresAt)
         }
@@ -72,15 +77,16 @@ class DohDecisionCache(
 
     /**
      * Returns the cached verdict for [hostname], or executes [lookup] once across all concurrent callers
-     * for the same hostname while coalescing in-flight lookups.
+     * for the same key while coalescing in-flight lookups on the bounded background worker pool.
      */
     fun getOrCompute(
         hostname: String,
         timeoutMs: Long = 3_000L,
         cacheResult: (DohVerdict) -> Boolean = { true },
+        ttlMsProvider: (DohVerdict) -> Long = { defaultTtlMs },
         lookup: (String) -> DohVerdict
     ): DohVerdict {
-        val key = normalizeHost(hostname)
+        val key = normalizeKey(hostname)
         get(key)?.let { return it }
 
         val ourFuture = CompletableFuture<DohVerdict>()
@@ -89,7 +95,9 @@ class DohDecisionCache(
             return try {
                 existingFuture.get(timeoutMs, TimeUnit.MILLISECONDS)
             } catch (e: Exception) {
-                lookup(key)
+                // Never run network lookup directly on the calling (potentially Main UI) thread
+                CompletableFuture.supplyAsync({ lookup(key) }, DOH_NETWORK_EXECUTOR)
+                    .get(timeoutMs, TimeUnit.MILLISECONDS)
             }
         }
 
@@ -100,12 +108,13 @@ class DohDecisionCache(
                 ourFuture.complete(cached)
                 return cached
             }
-            // Always execute network lookup on the background DoH executor so calls from
+            // Always execute network lookup on the bounded background DoH executor so calls from
             // Android's Main UI thread never throw android.os.NetworkOnMainThreadException.
             val lookupFuture = CompletableFuture.supplyAsync({ lookup(key) }, DOH_NETWORK_EXECUTOR)
             val verdict = lookupFuture.get(timeoutMs, TimeUnit.MILLISECONDS)
-            if (cacheResult(verdict)) {
-                put(key, verdict)
+            val resolvedTtlMs = ttlMsProvider(verdict)
+            if (cacheResult(verdict) && resolvedTtlMs > 0L) {
+                put(key, verdict, resolvedTtlMs)
             }
             ourFuture.complete(verdict)
             verdict
@@ -141,15 +150,33 @@ class DohDecisionCache(
      */
     fun inFlightCount(): Int = inFlight.size
 
-    private fun normalizeHost(rawHost: String): String {
-        return rawHost.trim().trimEnd('.').lowercase(Locale.ROOT)
+    private fun normalizeKey(rawKey: String): String {
+        return rawKey.trim().trimEnd('.').lowercase(Locale.ROOT)
     }
 
     companion object {
         const val DEFAULT_MAX_ENTRIES: Int = 2_000
         const val DEFAULT_TTL_MS: Long = 30L * 60L * 1000L // 30 minutes
-        private val DOH_NETWORK_EXECUTOR = Executors.newCachedThreadPool { runnable ->
-            Thread(runnable, "hm01-doh-worker").apply { isDaemon = true }
+        private const val CORE_POOL_THREADS = 4
+        private const val MAX_POOL_THREADS = 16
+        private const val MAX_QUEUE_CAPACITY = 256
+
+        private val workerCounter = AtomicInteger(1)
+
+        internal val DOH_NETWORK_EXECUTOR = ThreadPoolExecutor(
+            CORE_POOL_THREADS,
+            MAX_POOL_THREADS,
+            30L,
+            TimeUnit.SECONDS,
+            LinkedBlockingQueue(MAX_QUEUE_CAPACITY),
+            ThreadFactory { runnable ->
+                Thread(runnable, "hm01-doh-worker-${workerCounter.getAndIncrement()}").apply {
+                    isDaemon = true
+                }
+            },
+            ThreadPoolExecutor.AbortPolicy()
+        ).apply {
+            allowCoreThreadTimeOut(true)
         }
     }
 }
