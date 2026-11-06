@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.github.turney267"
-version = "1.0.0"
+version = "1.6.0"
 
 android {
     namespace = "dev.hm03.browser"
@@ -64,7 +64,7 @@ afterEvaluate {
             register<MavenPublication>("release") {
                 groupId = "com.github.turney267"
                 artifactId = "hm03-core"
-                version = "1.0.0"
+                version = "1.6.0"
                 from(components["release"])
             }
         }

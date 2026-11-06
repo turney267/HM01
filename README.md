@@ -14,6 +14,7 @@ It solves a critical problem for digital-minimalism setups, parental control DPC
 4. **Configurable RFC 8484 DNS-over-HTTPS (DoH):** Supports developer-fixed DoH endpoints (`DnsMode.DEVELOPER_FIXED`), user-selectable DoH provider lists with optional custom DoH input (`DnsMode.USER_DEFINED`), or disabled DoH (`DnsMode.DISABLED`), using EDNS(0)-padded HTTPS `POST` requests and failing closed on DNS errors by default.
 5. **1-Hop "Link Leash" (Easily Modified or Removed):** By default, users can browse within the website they opened and take at most `1` external domain hop (`maxExternalDomainHops = 1`). Developers can change the hop limit (`withLinkLeash(n)`) or remove it completely (`withoutLinkLeash()` / `maxExternalDomainHops = null`).
 6. **Configurable Media Lockdown & Path-Scoped OAuth:** Developers can supply custom lists of blocked media extensions/MIME types and path-scoped platform rules (allowing `/login` or `/oauth` on a platform while blocking its social feed), enforced across main-frame `GET`/`POST` navigations and all `<iframe>` sub-frames.
+7. **2FA App-Switching & Full OAuth Callback Support:** Keeps active sign-in sessions accessible in the Android Recents switcher while the user switches to an Authenticator app or password manager to retrieve a 2FA/OTP code, automatically upgrades initial and mid-session `http://` redirects to `https://`, and supports RFC 8252 loopback OAuth callbacks (`http://127.0.0.1:<port>` / `http://localhost:<port>`) as well as sanitized custom-scheme and `intent://` native app handoffs.
 
 ---
 
@@ -54,7 +55,7 @@ Pin an immutable release tag or commit SHA:
 
 ```kotlin
 dependencies {
-    implementation("com.github.turney267.HM03:hm03-core:v1.0.0")
+    implementation("com.github.turney267.HM03:hm03-core:v1.6.0")
 }
 ```
 
