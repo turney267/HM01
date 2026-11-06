@@ -44,6 +44,9 @@
     <string name="restriction_session_timeout_title">Session Timeout (Seconds)</string>
     <string name="restriction_session_timeout_desc">Automatically closes and wipes the browser session after this duration.</string>
 
+    <string name="restriction_persist_cookies_title">Persist Auth Cookies &amp; Storage</string>
+    <string name="restriction_persist_cookies_desc">Preserve cookies and WebStorage across sessions so OAuth/SSO providers remember the user while still wiping history and cache on close.</string>
+
     <string name="restriction_block_video_audio_title">Block Video and Audio Streams</string>
     <string name="restriction_block_video_audio_desc">Blocks configured video/audio extensions, media headers, MSE, WebRTC, and HTML5 media playback.</string>
 

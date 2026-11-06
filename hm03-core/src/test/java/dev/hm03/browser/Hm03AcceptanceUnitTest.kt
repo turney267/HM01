@@ -585,7 +585,19 @@ class Hm03AcceptanceUnitTest {
         assertTrue(jsLockdown.contains("window.RTCPeerConnection"))
 
         // Verify wipeEphemeralWebData executes safely without throwing when invoked headless in JVM tests
+        // in both ephemeral (default) and persistent-cookies modes.
         IntentBrowserActivity.wipeEphemeralWebData(context = null, webView = null)
+        IntentBrowserActivity.wipeEphemeralWebData(
+            context = null,
+            webView = null,
+            persistCookiesAndStorage = true
+        )
+
+        val defaultConfig = BrowserPolicyConfig()
+        assertFalse(defaultConfig.persistCookiesAndStorage)
+        val persistentConfig = defaultConfig.withPersistentCookiesAndStorage()
+        assertTrue(persistentConfig.persistCookiesAndStorage)
+        assertFalse(persistentConfig.withPersistentCookiesAndStorage(false).persistCookiesAndStorage)
     }
 
     // =========================================================================

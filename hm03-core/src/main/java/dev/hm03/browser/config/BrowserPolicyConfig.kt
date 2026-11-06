@@ -102,6 +102,14 @@ data class BrowserPolicyConfig(
     val maxExternalDomainHops: Int? = 1,
     val maxTotalNavigationHops: Int = 45,
     val sessionTimeoutMs: Long = 10 * 60 * 1000L, // 10 minutes
+    /**
+     * If `true`, preserves cookies (`CookieManager`) and `WebStorage` (`localStorage` / `IndexedDB`)
+     * across browser sessions and flushes cookies to disk on session close so OAuth/SSO identity providers
+     * (e.g. Google, Microsoft, Apple) remember the user without repeated password/2FA prompts.
+     * Browsing history, back-stack, form data, and cache are still wiped at the end of every session.
+     * Defaults to `false` (strictly ephemeral: wipes all cookies and storage on session start/close).
+     */
+    val persistCookiesAndStorage: Boolean = false,
     val blockVideoAndAudio: Boolean = true,
     /**
      * Media file extensions blocked when [blockVideoAndAudio] is `true`.
@@ -135,6 +143,14 @@ data class BrowserPolicyConfig(
      */
     fun withLinkLeash(maxExternalHops: Int): BrowserPolicyConfig =
         copy(maxExternalDomainHops = maxExternalHops.coerceAtLeast(0))
+
+    /**
+     * Returns a copy of this configuration with persistent cookies and `WebStorage` enabled or disabled.
+     * When enabled (`true`), auth cookies and `localStorage` survive across sessions while browsing history,
+     * back-stack, form data, and cache continue to be wiped on close.
+     */
+    fun withPersistentCookiesAndStorage(enabled: Boolean = true): BrowserPolicyConfig =
+        copy(persistCookiesAndStorage = enabled)
 
     /**
      * Resolves the active DoH endpoint URL based on [dnsMode], [selectedDnsEndpointUrl],

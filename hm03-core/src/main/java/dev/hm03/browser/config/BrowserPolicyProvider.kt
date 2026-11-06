@@ -349,6 +349,12 @@ object BrowserPolicyProvider {
             base.sessionTimeoutMs
         }
 
+        val persistCookiesAndStorage = if (bundle.containsKey("persist_cookies_and_storage")) {
+            bundle.getBoolean("persist_cookies_and_storage", base.persistCookiesAndStorage)
+        } else {
+            base.persistCookiesAndStorage
+        }
+
         val blockVideoAudio = if (bundle.containsKey("block_video_audio")) {
             bundle.getBoolean("block_video_audio", base.blockVideoAndAudio)
         } else {
@@ -384,6 +390,7 @@ object BrowserPolicyProvider {
             maxExternalDomainHops = maxExternalHops,
             maxTotalNavigationHops = maxTotalHops,
             sessionTimeoutMs = sessionTimeoutMs,
+            persistCookiesAndStorage = persistCookiesAndStorage,
             blockVideoAndAudio = blockVideoAudio,
             capImageDimensions = capImages,
             blockSearchEngines = blockSearch

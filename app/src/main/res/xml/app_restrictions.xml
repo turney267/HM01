@@ -100,6 +100,13 @@
         android:title="@string/restriction_session_timeout_title" />
 
     <restriction
+        android:defaultValue="false"
+        android:description="@string/restriction_persist_cookies_desc"
+        android:key="persist_cookies_and_storage"
+        android:restrictionType="bool"
+        android:title="@string/restriction_persist_cookies_title" />
+
+    <restriction
         android:defaultValue="true"
         android:description="@string/restriction_block_video_audio_desc"
         android:key="block_video_audio"

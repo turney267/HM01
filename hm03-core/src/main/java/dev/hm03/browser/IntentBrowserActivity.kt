@@ -89,10 +89,13 @@ class IntentBrowserActivity : Activity() {
             return
         }
 
-        // Defensively wipe any leftover disk state from a prior OS-killed session before starting
-        wipeSessionStorageOnly(applicationContext)
-
         activeConfig = BrowserPolicyProvider.getConfig(applicationContext)
+        if (!activeConfig.persistCookiesAndStorage) {
+            // Defensively wipe any leftover disk state from a prior OS-killed session before starting
+            wipeSessionStorageOnly(applicationContext)
+        } else {
+            flushPersistentCookies()
+        }
         val dohResolver = BrowserPolicyProvider.getDohResolver(applicationContext)
 
         policyEvaluator = UrlPolicyEvaluator(
@@ -154,9 +157,8 @@ class IntentBrowserActivity : Activity() {
         if (oldWv != null && ::webContainer.isInitialized) {
             webContainer.removeView(oldWv)
         }
-        wipeEphemeralWebData(applicationContext, oldWv)
-
         activeConfig = BrowserPolicyProvider.getConfig(applicationContext)
+        wipeEphemeralWebData(applicationContext, oldWv, activeConfig.persistCookiesAndStorage)
         committedHost = null
         isBlockedScreenVisible = false
         isSessionWiped = false
@@ -251,6 +253,9 @@ class IntentBrowserActivity : Activity() {
                 true
             }
             is PolicyDecision.HandOffToNativeApp -> {
+                if (::activeConfig.isInitialized && activeConfig.persistCookiesAndStorage) {
+                    flushPersistentCookies()
+                }
                 launchSanitizedExternalIntent(
                     url = decision.url,
                     targetPackage = decision.targetPackage,
@@ -581,6 +586,9 @@ class IntentBrowserActivity : Activity() {
                 super.onPageFinished(view, url)
                 syncCommittedHostHeader(view, url)
                 injectMediaLockdownScript(view)
+                if (activeConfig.persistCookiesAndStorage) {
+                    flushPersistentCookies()
+                }
                 if (url != null && url != "about:blank") {
                     policyEvaluator.markRedirectGraceComplete()
                 }
@@ -863,8 +871,8 @@ class IntentBrowserActivity : Activity() {
     }
 
     /**
-     * Immediately destroys the session, wipes all cookies, WebStorage, cache, and history,
-     * and finishes the activity.
+     * Immediately destroys the session, wipes cache/history (and cookies/storage unless
+     * [BrowserPolicyConfig.persistCookiesAndStorage] is enabled), and finishes the activity.
      */
     fun closeAndWipeSession() {
         mainHandler.removeCallbacks(sessionTimeoutRunnable)
@@ -876,7 +884,8 @@ class IntentBrowserActivity : Activity() {
             if (currentWv != null && ::webContainer.isInitialized) {
                 webContainer.removeView(currentWv)
             }
-            wipeEphemeralWebData(applicationContext, currentWv)
+            val persistCookies = ::activeConfig.isInitialized && activeConfig.persistCookiesAndStorage
+            wipeEphemeralWebData(applicationContext, currentWv, persistCookies)
         }
         if (!isFinishing) {
             finishAndRemoveTask()
@@ -893,7 +902,8 @@ class IntentBrowserActivity : Activity() {
             if (currentWv != null && ::webContainer.isInitialized) {
                 webContainer.removeView(currentWv)
             }
-            wipeEphemeralWebData(applicationContext, currentWv)
+            val persistCookies = ::activeConfig.isInitialized && activeConfig.persistCookiesAndStorage
+            wipeEphemeralWebData(applicationContext, currentWv, persistCookies)
         }
         super.onDestroy()
     }
@@ -956,12 +966,30 @@ class IntentBrowserActivity : Activity() {
             }
         }
 
+        @JvmStatic
+        internal fun flushPersistentCookies() {
+            runCatching {
+                CookieManager.getInstance().flush()
+            }
+        }
+
         /**
-         * Wipes all cookies, WebStorage, HTTP auth credentials, cache, form data, and history.
+         * Wipes ephemeral WebView state (cache, form data, history, SSL preferences, and WebView instance).
+         * When [persistCookiesAndStorage] is `false` (default), also wipes all cookies, `WebStorage`,
+         * and HTTP auth credentials. When `true`, preserves cookies and `WebStorage` and flushes cookies to disk.
          */
         @JvmStatic
-        fun wipeEphemeralWebData(context: Context?, webView: WebView?) {
-            wipeSessionStorageOnly(context)
+        @JvmOverloads
+        fun wipeEphemeralWebData(
+            context: Context?,
+            webView: WebView?,
+            persistCookiesAndStorage: Boolean = false
+        ) {
+            if (persistCookiesAndStorage) {
+                flushPersistentCookies()
+            } else {
+                wipeSessionStorageOnly(context)
+            }
             if (webView != null) {
                 runCatching {
                     webView.stopLoading()

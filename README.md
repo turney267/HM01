@@ -9,7 +9,7 @@ It solves a critical problem for digital-minimalism setups, parental control DPC
 ## Core Design Principles
 
 1. **No Address Bar, No Search Bar, No Launcher Icon:** Users cannot open `HM03` on their own or type a URL. It wakes up only when invoked by an external `https://` link (`ACTION_VIEW`) or an in-app OAuth Custom Tab request.
-2. **No Tabs, No Bookmarks, No Persistent History:** When the window is closed, times out, or receives a new intent, all cookies, `WebStorage`, HTTP auth credentials, cache, and history are immediately wiped.
+2. **No Tabs, No Bookmarks, No Persistent History:** When the window is closed, times out, or receives a new intent, browsing history, back-stack, form data, and cache are immediately wiped. By default (`persistCookiesAndStorage = false`), cookies and `WebStorage` are also wiped on close; developers can optionally enable `persistCookiesAndStorage = true` (or `.withPersistentCookiesAndStorage()`) so OAuth/SSO providers remember signed-in accounts across sessions without repeated password/2FA prompts.
 3. **Unopinionated Engine — Developer & User in Control:** Out of the box, `HM03` ships with **empty** website blocklists (plus a single illustrative example for path-scoped rules and media extensions) and **zero** hardcoded third-party DNS providers. Every policy decision outside the chosen DNS server is configured by the host application.
 4. **Configurable RFC 8484 DNS-over-HTTPS (DoH):** Supports developer-fixed DoH endpoints (`DnsMode.DEVELOPER_FIXED`), user-selectable DoH provider lists with optional custom DoH input (`DnsMode.USER_DEFINED`), or disabled DoH (`DnsMode.DISABLED`), using EDNS(0)-padded HTTPS `POST` requests and failing closed on DNS errors by default.
 5. **1-Hop "Link Leash" (Easily Modified or Removed):** By default, users can browse within the website they opened and take at most `1` external domain hop (`maxExternalDomainHops = 1`). Developers can change the hop limit (`withLinkLeash(n)`) or remove it completely (`withoutLinkLeash()` / `maxExternalDomainHops = null`).
@@ -98,6 +98,7 @@ BrowserPolicyProvider.configure(
         stripWebViewUserAgentToken = true,
         maxExternalDomainHops = 1, // Call .withoutLinkLeash() or set to null to disable
         sessionTimeoutMs = 10 * 60 * 1000L,
+        persistCookiesAndStorage = true, // Keep OAuth/SSO cookies across sessions while still wiping history & cache
         blockVideoAndAudio = true,
         blockedMediaExtensions = setOf(".mp4", ".webm", ".m3u8", ".mp3"),
         blockedMediaMimePrefixes = setOf("video/", "audio/")
@@ -147,6 +148,7 @@ When deployed as a standalone APK (`:app`), `HM03` reads Android Enterprise Mana
 | `max_external_domain_hops` | `integer` | `1` | Maximum external domain hops allowed (`-1` to disable Link Leash) |
 | `max_total_navigation_hops` | `integer` | `45` | Maximum total main-frame navigations per session |
 | `session_timeout_seconds` | `integer` | `600` | Auto-close and wipe timeout in seconds |
+| `persist_cookies_and_storage` | `bool` | `false` | Preserve cookies and `WebStorage` across sessions for seamless OAuth/SSO while still wiping history and cache on close |
 | `block_video_audio` | `bool` | `true` | Block configured video/audio streams, MSE, WebRTC, and HTML5 media |
 | `cap_image_dimensions` | `bool` | `false` | Cap rendered images to `240x240px` |
 | `block_search_engines` | `bool` | `true` | Block developer-configured search engine and proxy domains |
