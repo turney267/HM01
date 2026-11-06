@@ -14,6 +14,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "HM01"
-include(":hm01-core")
+rootProject.name = "HM03"
+include(":hm03-core")
 include(":app")

@@ -3,8 +3,8 @@
 
     <application
         android:allowBackup="false"
-        android:dataExtractionRules="@xml/hm01_data_extraction_rules"
-        android:fullBackupContent="@xml/hm01_backup_rules"
+        android:dataExtractionRules="@xml/hm03_data_extraction_rules"
+        android:fullBackupContent="@xml/hm03_backup_rules"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:usesCleartextTraffic="false">

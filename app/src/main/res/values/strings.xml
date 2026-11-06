@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">HM01</string>
+    <string name="app_name">HM03</string>
 
     <string name="restriction_brand_title_title">Brand Title</string>
     <string name="restriction_brand_title_desc">Header title displayed on policy screens.</string>

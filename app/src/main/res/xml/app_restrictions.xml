@@ -2,7 +2,7 @@
 <restrictions xmlns:android="http://schemas.android.com/apk/res/android">
 
     <restriction
-        android:defaultValue="HM01"
+        android:defaultValue="HM03"
         android:description="@string/restriction_brand_title_desc"
         android:key="brand_title"
         android:restrictionType="string"

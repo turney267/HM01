@@ -1,1 +1,1 @@
-# ProGuard rules for standalone HM01 app
+# ProGuard rules for standalone HM03 app

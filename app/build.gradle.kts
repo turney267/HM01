@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "dev.hm01.browser.app"
+    namespace = "dev.hm03.browser.app"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "dev.hm01.browser"
+        applicationId = "dev.hm03.browser"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
@@ -43,7 +43,7 @@ android {
 }
 
 dependencies {
-    implementation(project(":hm01-core"))
+    implementation(project(":hm03-core"))
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.5.2")
