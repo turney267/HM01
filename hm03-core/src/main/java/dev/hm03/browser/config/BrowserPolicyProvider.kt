@@ -8,7 +8,7 @@ import dev.hm03.browser.dns.DohResolver
 import java.util.Locale
 
 /**
- * Callback interface allowing a host application (such as Juubun) to present its own native
+ * Callback interface allowing a host application to present its own native
  * DNS selection popup the first time the user opens a link when [DnsMode.USER_DEFINED] is active
  * and no DNS provider has been chosen yet.
  */
@@ -24,7 +24,7 @@ fun interface DnsSelectionPromptHandler {
  * Singleton policy provider and DI hook for `HM03`.
  *
  * Supports:
- * 1. Programmatic configuration via [configure] (for host apps like Juubun consuming `:hm03-core`).
+ * 1. Programmatic configuration via [configure] (for host apps consuming `:hm03-core`).
  * 2. User-defined DNS selection persistence via [setUserSelectedDns] / [getUserSelectedDnsUrl].
  * 3. Android Enterprise Managed Configurations via [RestrictionsManager].
  */

@@ -349,7 +349,7 @@ class Hm03AcceptanceUnitTest {
                         )
                     ),
                     customCallbackSchemes = mapOf(
-                        "juubunparent" to CustomSchemeTarget("juubunparent", "com.juubun.app")
+                        "exampleapp" to CustomSchemeTarget("exampleapp", "com.example.app")
                     )
                 )
             },
@@ -358,7 +358,7 @@ class Hm03AcceptanceUnitTest {
 
         // 1. Google OAuth sign-in paths are allowed
         val googleOAuth = evaluator.evaluateMainFrameNavigation(
-            "https://accounts.google.com/o/oauth2/v2/auth?client_id=123&redirect_uri=juubunparent://oauth",
+            "https://accounts.google.com/o/oauth2/v2/auth?client_id=123&redirect_uri=exampleapp://oauth",
             isInitialLaunch = true
         )
         assertTrue(googleOAuth is PolicyDecision.Allow)
@@ -390,13 +390,13 @@ class Hm03AcceptanceUnitTest {
         assertTrue(ghExplore is PolicyDecision.Block)
         assertEquals(BlockReason.NON_OAUTH_PLATFORM_PATH, (ghExplore as PolicyDecision.Block).reason)
 
-        // 5. Custom callback scheme handoff (juubunparent://oauth?code=xyz)
+        // 5. Custom callback scheme handoff (exampleapp://oauth?code=xyz)
         val callbackDecision = evaluator.evaluateMainFrameNavigation(
-            "juubunparent://oauth?code=xyz123"
+            "exampleapp://oauth?code=xyz123"
         )
         assertTrue(callbackDecision is PolicyDecision.HandOffToNativeApp)
         assertEquals(
-            "com.juubun.app",
+            "com.example.app",
             (callbackDecision as PolicyDecision.HandOffToNativeApp).targetPackage
         )
 
@@ -410,20 +410,20 @@ class Hm03AcceptanceUnitTest {
     }
 
     // =========================================================================
-    // Scenario 5: Attention-Hog Blocklist Injection (Juubun Integration)
+    // Scenario 5: Attention-Hog Blocklist Injection (Host App Integration)
     // =========================================================================
 
     @Test
     fun scenario5_attentionHogBlocklistInjection() {
-        val juubunConfig = BrowserPolicyConfig(
-            brandTitle = "Juubun Safe Link",
+        val hostConfig = BrowserPolicyConfig(
+            brandTitle = "Safe Link Viewer",
             blockedDomains = setOf("substack.com", "reddit.com", "news.ycombinator.com"),
             blockedHostKeywords = setOf(" tabloid ", "gossip"),
             blockedPathRegexes = listOf("^/reels(/|$)", "^/shorts(/|$)", "^/r/")
         )
 
         val evaluator = UrlPolicyEvaluator(
-            configProvider = { juubunConfig },
+            configProvider = { hostConfig },
             dohResolver = createAllowAllDohResolver()
         )
 
@@ -556,9 +556,9 @@ class Hm03AcceptanceUnitTest {
         )
         val html = BlockedPageRenderer.buildBlockedHtml(
             blockDecision,
-            BrowserPolicyConfig(brandTitle = "Juubun Safe Link")
+            BrowserPolicyConfig(brandTitle = "Safe Link Viewer")
         )
-        assertTrue(html.contains("Juubun Safe Link Policy"))
+        assertTrue(html.contains("Safe Link Viewer Policy"))
         assertTrue(html.contains("Blocked Website"))
         assertFalse("Blocked HTML must escape script tags", html.contains("<script>"))
         assertTrue(html.contains("&lt;script&gt;"))
@@ -686,9 +686,9 @@ class Hm03AcceptanceUnitTest {
     fun securityRegression_hm03_03_customSchemeDefaultDenyAndPackagePinning() {
         val config = BrowserPolicyConfig(
             customCallbackSchemes = mapOf(
-                "juubunparent" to CustomSchemeTarget(
-                    scheme = "juubunparent",
-                    targetPackage = "com.juubun.app",
+                "exampleapp" to CustomSchemeTarget(
+                    scheme = "exampleapp",
+                    targetPackage = "com.example.app",
                     action = "android.intent.action.VIEW"
                 )
             ),
@@ -700,9 +700,9 @@ class Hm03AcceptanceUnitTest {
         )
 
         // 1. Registered custom callback scheme is allowed and carries targetPackage
-        val registered = evaluator.evaluateMainFrameNavigation("juubunparent://oauth?code=secret")
+        val registered = evaluator.evaluateMainFrameNavigation("exampleapp://oauth?code=secret")
         assertTrue(registered is PolicyDecision.HandOffToNativeApp)
-        assertEquals("com.juubun.app", (registered as PolicyDecision.HandOffToNativeApp).targetPackage)
+        assertEquals("com.example.app", (registered as PolicyDecision.HandOffToNativeApp).targetPackage)
 
         // 2. Unregistered custom schemes and secondary browser schemes are blocked by default (Option 1A)
         for (unregisteredUrl in listOf(

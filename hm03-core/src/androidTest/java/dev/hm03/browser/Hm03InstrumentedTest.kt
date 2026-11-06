@@ -29,7 +29,7 @@ class Hm03InstrumentedTest {
     @Test
     fun managedRestrictionsBundleParsesCorrectly() {
         val bundle = Bundle().apply {
-            putString("brand_title", "Juubun Safe Link")
+            putString("brand_title", "Safe Link Viewer")
             putString("custom_doh_url", "https://family.cloudflare-dns.com/dns-query")
             putBoolean("fail_closed_on_dns_error", true)
             putString("blocked_domains", "substack.com, reddit.com, news.ycombinator.com")
@@ -41,7 +41,7 @@ class Hm03InstrumentedTest {
         }
 
         val parsed = BrowserPolicyProvider.parseRestrictionsBundle(bundle)
-        assertEquals("Juubun Safe Link", parsed.brandTitle)
+        assertEquals("Safe Link Viewer", parsed.brandTitle)
         assertEquals("https://family.cloudflare-dns.com/dns-query", parsed.customDohUrl)
         assertTrue(parsed.failClosedOnDnsError)
         assertTrue(parsed.blockedDomains.contains("substack.com"))

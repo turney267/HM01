@@ -36,7 +36,7 @@ data class DnsProviderOption(
 )
 
 /**
- * Target descriptor for handing off custom OAuth/app callback URI schemes (e.g. `juubundpc://`, `myapp://oauth`).
+ * Target descriptor for handing off custom OAuth/app callback URI schemes (e.g. `exampleapp://`, `myapp://oauth`).
  */
 data class CustomSchemeTarget(
     val scheme: String,
