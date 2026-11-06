@@ -283,14 +283,13 @@ class UrlPolicyEvaluator(
         // =========================================================================
         // STEP 4: Pluggable Blocklist (Developer-Configured)
         // =========================================================================
-        if (!isExplicitlyAllowedOverride) {
+        if (!isExplicitlyAllowedOverride && !isTrustedIdpOrScopedOAuth) {
             val blocklistDecision = evaluateBlocklists(
                 url = canonicalUrl,
                 host = host,
                 effectiveDomain = effectiveDomain,
-                pathWithQuery = pathWithQuery,
-                config = config,
-                isAllowedScopedOAuth = isTrustedIdpOrScopedOAuth
+                normalizedPath = normalizedPath,
+                config = config
             )
             if (blocklistDecision != null) {
                 return blocklistDecision
@@ -506,14 +505,13 @@ class UrlPolicyEvaluator(
         }
 
         // Pluggable blocklists
-        if (!isExplicitlyAllowedOverride) {
+        if (!isExplicitlyAllowedOverride && !isTrustedIdpOrScopedOAuth) {
             val blocklistDecision = evaluateBlocklists(
                 url = canonicalUrl,
                 host = host,
                 effectiveDomain = effectiveDomain,
-                pathWithQuery = pathWithQuery,
-                config = config,
-                isAllowedScopedOAuth = isTrustedIdpOrScopedOAuth
+                normalizedPath = normalizedPath,
+                config = config
             )
             if (blocklistDecision != null) {
                 return blocklistDecision
@@ -576,9 +574,8 @@ class UrlPolicyEvaluator(
         url: String,
         host: String,
         effectiveDomain: String,
-        pathWithQuery: String,
-        config: BrowserPolicyConfig,
-        isAllowedScopedOAuth: Boolean = false
+        normalizedPath: String,
+        config: BrowserPolicyConfig
     ): PolicyDecision.Block? {
         // 1. Developer-Injected Blocked TLDs (e.g. ".xxx", ".porn")
         if (config.blockedTlds.any { rawTld ->
@@ -592,7 +589,7 @@ class UrlPolicyEvaluator(
         }
 
         // 2. Developer-Injected Blocked Domains (exact domain + subdomain suffix match)
-        if (!isAllowedScopedOAuth && isDomainInSet(host, effectiveDomain, config.blockedDomains)) {
+        if (isDomainInSet(host, effectiveDomain, config.blockedDomains)) {
             return PolicyDecision.Block(BlockReason.HOST_BLOCKLIST_DOMAIN, url, host)
         }
 
@@ -605,13 +602,15 @@ class UrlPolicyEvaluator(
             return PolicyDecision.Block(BlockReason.HOST_BLOCKLIST_KEYWORD, url, host)
         }
 
-        // 4. Developer-Injected Blocked Path Regexes (with length cap against ReDoS)
+        // 4. Developer-Injected Blocked Path Regexes (evaluated on normalizedPath without query string)
         if (config.compiledBlockedPathRegexes.isNotEmpty()) {
-            if (pathWithQuery.length > MAX_REGEX_EVAL_LENGTH) {
-                return PolicyDecision.Block(BlockReason.HOST_BLOCKLIST_PATH, url, host)
+            val boundedPath = if (normalizedPath.length > MAX_REGEX_EVAL_LENGTH) {
+                normalizedPath.take(MAX_REGEX_EVAL_LENGTH)
+            } else {
+                normalizedPath
             }
             if (config.compiledBlockedPathRegexes.any { regex ->
-                    regex.containsMatchIn(pathWithQuery)
+                    regex.containsMatchIn(boundedPath)
                 }
             ) {
                 return PolicyDecision.Block(BlockReason.HOST_BLOCKLIST_PATH, url, host)

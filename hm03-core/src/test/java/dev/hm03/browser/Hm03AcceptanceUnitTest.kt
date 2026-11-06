@@ -364,12 +364,13 @@ class Hm03AcceptanceUnitTest {
         assertTrue(googleOAuth is PolicyDecision.Allow)
         assertTrue((googleOAuth as PolicyDecision.Allow).isTrustedIdpOrScopedOAuth)
 
+        val longToken = "A".repeat(2600)
         for (regionalAuthUrl in listOf(
-            "https://accounts.google.com.au/accounts/SetSID?ssdc=1",
-            "https://accounts.google.com.au/CookieMismatch",
+            "https://accounts.google.com.au/accounts/SetSID?ssdc=1&sidt=$longToken",
+            "https://accounts.google.com.au/CookieMismatch?continue=$longToken",
             "https://accounts.google.com.au/InteractiveLogin",
             "https://accounts.google.com/_/signin/challenge",
-            "https://accounts.youtube.com/accounts/SetSID?ssdc=1",
+            "https://accounts.youtube.com/accounts/SetSID?ssdc=1&sidt=$longToken",
             "https://accounts.youtube.com/accounts/CheckConnection?pmpo=https://accounts.google.com"
         )) {
             val regionalDecision = evaluator.evaluateMainFrameNavigation(regionalAuthUrl)
